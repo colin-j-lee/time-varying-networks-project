@@ -1,0 +1,255 @@
+---
+title: "5_1. Stationary Vis"
+format: html
+editor: visual
+---
+
+```{r, include = FALSE}
+library(qgraph)
+library(mgm)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+```{r}
+load(sprintf("%s/Data/stationary_models.RData", wd)) 
+
+```
+
+Layout stuff
+
+```{r}
+mean_wadj <- list()
+for (i in 1:nrow(stationary_models)) {
+  mean_wadj[[i]] <- stationary_models$con_models[[i]][["pairwise"]][["wadj"]]  # Using the contemporaneous network for layout
+}
+
+# Get layout of mean graph
+Q_shit <- list()
+for (i in 1:length(mean_wadj)) {
+  Q_shit[[i]] <- qgraph(t(mean_wadj[[i]]), layout = "spring", DoNotPlot = TRUE, repulsion = 0.6)
+}
+
+Q_layout <- tibble(
+  SID = stationary_models$SID,
+  Q_shit = Q_shit
+)
+#for tvn contemp and lagged networks
+save(Q_layout, file = "Data/Q_layout.RData")
+```
+
+xtra stuff
+
+```{r}
+#group by trait
+traitgroups <- list("Extraversion" = c(1:3), 
+                    "Agreeableness" = c(4:6),
+                    "Conscientiousness" = c(7:9),
+                    "Neuroticism" = c(10:12),
+                    "Openness" = c(13:15)
+                    )
+
+
+#default plotting settings
+theme_set(theme_bw(base_size = 14, base_family="Times"))
+theme_update(legend.position="bottom", 
+             panel.spacing=grid::unit(0,"lines"),
+             strip.background=element_rect(color="black",fill="white"),
+             panel.grid=element_blank())
+```
+
+Lagged parameter estimates w sign
+
+```{r}
+#negative signs are stored separately so apply them to the relevant parameter estimates
+lag_par_ests <- list()
+for(i in 1:nrow(stationary_models)){
+  lag_par_ests[[i]] <- (stationary_models$lag_models[[i]][["wadj"]])
+  }
+
+lag_ind_negative <- list()
+for(i in 1:nrow(stationary_models)){
+  lag_ind_negative[[i]] <- which(stationary_models$lag_models[[i]][["signs"]] == -1, arr.ind = T)
+}
+
+
+for(i in 1:nrow(stationary_models)){
+  lag_par_ests[[i]][lag_ind_negative[[i]]] <- lag_par_ests[[i]][lag_ind_negative[[i]]]*-1
+}
+
+#check
+# stationary_models$lag_models[[1]][["signs"]]
+# lag_par_ests[[1]]
+
+```
+
+Con parameter estimates w sign
+
+```{r}
+#negative signs are stored separately so apply them to the relevant parameter estimates
+con_par_ests <- list()
+for(i in 1:nrow(stationary_models)){
+  con_par_ests[[i]] <- (stationary_models$con_models[[i]][["pairwise"]][["wadj"]])
+  }
+
+con_ind_negative <- list()
+for(i in 1:nrow(stationary_models)){
+  con_ind_negative[[i]] <- which(stationary_models$con_models[[i]][["pairwise"]][["signs"]] == -1, arr.ind = T)
+  }
+
+for(i in 1:nrow(stationary_models)){
+  con_par_ests[[i]][con_ind_negative[[i]]] <- con_par_ests[[i]][con_ind_negative[[i]]]*-1
+}
+
+# #check
+# stationary_models$con_models[[1]][["pairwise"]][["signs"]]
+# con_par_ests[[1]]
+```
+
+```{r}
+stationary_plot_fnc <- function(par_ests, Q_shit, traitgroups, SID, type, preds) {
+    # Map edge colors based on par_ests sign
+  edge_color <- ifelse(par_ests > 0, "#0072B2", "#D55E00")
+  
+    # Split the labels into two text objects (large letter + small text)
+  # big_letters <- c("E", "E", "E",
+  #                  "A", "A", "A",
+  #                  "C", "C", "C",
+  #                  "N", "N", "N",
+  #                  "O", "O", "O")
+  
+  labels <- c("Soc", "Energy", "Assert",
+                  "Trust", "Resp", "Comp", 
+                  "Prod", "Resp", "Org", 
+                  "Dep", "Anx", "Emo", 
+                  "Int", "Aesth", "Crtv")
+  # 
+  # labels <- mapply(function(big, small) {
+  #   paste0(big, "\n", small)  # Large letter on top, small text below
+  # }, big_letters, small_text, SIMPLIFY = FALSE)
+
+  qgraph(par_ests, 
+       layout = "circle", 
+       groups = traitgroups, 
+       legend = FALSE,
+       color = c("#EAF6E8", "#CDE7CD", "#A8D8B5", "#84C89A", "#64B887"),
+       width = 16, height = 16,
+       border.width = 1.2, border.color = "black", # black circle around node
+       
+       label.cex = 1,  # Adjust overall text size
+       label.color = 'black',
+       labels = labels,   # Use formatted labels
+       
+       edge.color = edge_color, 
+       minimum = 0, maximum = .5, title.cex = 1, 
+       trans = 1, fade = FALSE,
+       vTrans = 250, details = FALSE, shape = "ellipse", 
+       node.width = 1, node.height = .6, vsize = 12, 
+       asize = 4, edge.width = 1.5,
+       
+       title = "",
+       layoutOffset = c(0, 0), GLratio = 3.5, layoutScale = c(.8, .8),
+       DoNotPlot = TRUE)
+
+}
+```
+
+networks
+
+```{r}
+# ----- Store Results in a Tibble ------
+stationary_plots <- tibble(
+  SID = sapply(stationary_models$SID, unique),
+  stat_con_networks = lapply(seq_len(nrow(stationary_models)), 
+                             function(i) {
+                               stationary_plot_fnc(con_par_ests[[i]],
+                                                   Q_shit[[i]], traitgroups, 
+                                                   stationary_models$SID[[i]], 
+                                                   "Contemporaneous",
+                                 stationary_models$con_models[[i]][["predictions"]])
+                                                                                     
+                               }),
+  stat_lag_networks = lapply(seq_len(nrow(stationary_models)),
+                             function (i) {stationary_plot_fnc(lag_par_ests[[i]][,,1], #not a matrix for some reason 
+                                   Q_shit[[i]], traitgroups, 
+                                   stationary_models$SID[[i]], 
+                                   "Lagged",
+                                   stationary_models$lag_models[[i]][["predictions"]]
+                                   )
+                             }
+                             )
+  )
+
+#make sure SID and network matches up; they did before i removed title
+x <- stationary_plots %>% filter(SID == 31624)
+plot(x$stat_lag_networks[[1]])
+plot(x$stat_con_networks[[1]])
+
+save(stationary_plots, file = "Data/stationary_plots.RData")
+```
+
+PDFs Function that includes title
+
+```{r}
+# ----- Define Plotting Function ------
+stationary_plot_pdf_fnc <- function(par_ests, edge_colors, Q_shit, traitgroups, SID, type, preds) {
+  qgraph(par_ests, 
+         layout = Q_shit$layout, 
+         groups = traitgroups, 
+         legend = FALSE,
+         palette = 'colorblind',
+         width = 15 * 1.4, height = 16,
+         border.width = 0.5, label.cex = 0.7, 
+         label.color = 'black', label.prop = 0.9, 
+         negDashed = TRUE, loop = 0.7,
+         labels = c("Sociability", "Energy Level", "Assertive", "Trust",
+                    "Respect", "Compassion", "Productivity", "Responsibility" , 
+                    "Organization", "Depression", "Anxiety",
+                    "Emo Volatility", "Int Curiosity", "Aesth Sense", "Crtv Imagination"), 
+         minimum = 0, maximum = .5, title.cex = 1, 
+         border.color = "grey60", edge.color = (edge_colors[,,1]), 
+         trans = 1, fade = FALSE,
+         vTrans = 190, details = FALSE, shape = "ellipse", 
+         node.width = 1, node.height = .6, vsize = 13, 
+         asize = 4, edge.width = .6, label.font = 15,
+         pie = preds[["errors"]][["R2"]], 
+         label.scale = FALSE,
+        title = paste("Participant", unique(as.character(SID)), type, "Stationary Network"),
+         layoutOffset = c(0, 0), GLratio = 3.5, layoutScale = c(.8, .8)) 
+}
+```
+
+Contemp
+
+```{r}
+pdf("Figures/Networks/Contemporaneous Stationary Networks.pdf")
+for(i in 1:nrow(stationary_models)){
+  stationary_plot_pdf_fnc(con_par_ests[[i]], 
+                         stationary_models$con_models[[i]][["edgecolor"]],
+                      Q_shit[[i]], traitgroups, 
+                      stationary_models$SID[[i]], 
+                      "Contemporaneous",
+                      stationary_models$con_models[[i]][["predictions"]])
+}
+dev.off()
+```
+
+Lagged
+
+```{r}
+pdf("Figures/Networks/Lagged Stationary Networks.pdf")
+for(i in 1:nrow(stationary_models)){
+  stationary_plot_pdf_fnc(lag_par_ests[[i]][,,1], #not a matrix for some reason 
+                                 stationary_models$lag_models[[i]][["edgecolor"]],
+                                   Q_shit[[i]], traitgroups, 
+                                   stationary_models$SID[[i]], 
+                                   "Lagged",
+                                   stationary_models$lag_models[[i]][["predictions"]])
+}
+dev.off()
+```

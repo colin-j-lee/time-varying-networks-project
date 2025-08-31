@@ -1,0 +1,325 @@
+---
+  title: "6_1. Bandwidth - Baseline Correlations"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(brms)
+library(plyr)
+library(psych)
+library(broom.mixed)
+library(furrr)
+library(effectsize)
+library(kableExtra)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/tvn_data_bw.RData", wd)) #lagged bandwidths to correlate
+load(sprintf("%s/Data/tvn_contemp_bw.RData", wd)) #contemporaneous bandwidths to correlate
+load(sprintf("%s/Data/tvn_wide.RData", wd)) #situations 
+load(sprintf("%s/Data/tvn_baseline_variables.RData", wd)) #demographics and baseline variables
+
+#combine pps and cpe in bw and baseline dataframes. already combined in tvn_wide
+#SID as character so scaling doesnt touch it
+tvn_data_bw <- tvn_data_bw %>%
+  mutate(study = ifelse(study %in% c("PPS", "CPE"), "PPS_CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         SID = as.character(SID))
+
+tvn_contemp_bw <- tvn_contemp_bw %>%
+  mutate(study = ifelse(study %in% c("PPS", "CPE"), "PPS_CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         SID = as.character(SID))
+
+tvn_baseline_variables <- tvn_baseline_variables %>%
+  mutate(study = ifelse(study %in% c("PPS", "CPE"), "PPS_CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         SID = as.character(SID)) %>%
+  mutate_if(is.numeric, ~scale(.)[, 1]) #scale predictors
+
+tvn_wide <- tvn_wide %>%
+  mutate(SID = as.character(SID))
+```
+
+Combine all race/ethcnity except white and east asian
+
+```{r}
+tvn_baseline_variables <- tvn_baseline_variables %>%
+  mutate(race_ethnicity = factor(case_when(
+    race_ethnicity %in% c("East Asian", "White") ~ race_ethnicity,
+    TRUE ~ "Other"
+  ), levels = c("White", "East Asian", "Other"))
+  )
+```
+
+Calculate DIAMONDS iSD and iMSSD using long data
+
+```{r}
+#mssd is returning 0 for NA values what the fuck
+mssd_safe <- function(x, na.rm = TRUE) {
+  if (sum(!is.na(x)) < 2) return(NA)  # If fewer than 2 valid values, return NA
+  return(mssd(x, na.rm = na.rm))
+}
+
+#calc sd and mssd per participant
+tvn_wide_sit <- tvn_wide %>%
+  group_by(SID)  %>%
+  mutate(Dut_sd = sd(Duty),
+         Dut_mssd = mssd_safe(Duty, na.rm =TRUE),
+         I_sd = sd(Intellect),
+         I_mssd = mssd_safe(Intellect),
+         A_sd = sd(Adversity),
+         A_mssd = mssd_safe(Adversity),
+         M_sd = sd(Mating),
+         M_mssd = mssd_safe(Mating),
+         O_sd = sd(pOsitivity),
+         O_mssd = mssd_safe(pOsitivity),
+         N_sd = sd(Negativity),
+         N_mssd = mssd_safe(Negativity),
+         Dec_sd = sd(Deception),
+         Dec_mssd = mssd_safe(Deception),
+         S_sd = sd(Sociality),
+         S_mssd = mssd_safe(Sociality)) %>%
+  ungroup() %>%
+  select(SID, Dut_sd:S_mssd) %>%
+  distinct() %>%
+  mutate_if(is.numeric, ~scale(.)[,1]) #scale predictors
+```
+
+Effects code study; First, weight by size; sample size for baseline and observations for DIAMODNS
+
+```{r}
+ipcs_sample_n <- tvn_wide %>% 
+  filter(study == "IPCS") %>%
+  group_by(SID) %>%
+  distinct(SID) %>%
+  nrow() #69
+ipcs_obs_n <- tvn_wide %>% filter(study == "IPCS") %>% nrow()
+
+pps_cpe_sample_n <- tvn_wide %>% 
+  filter(study == "PPS_CPE") %>%
+  group_by(SID) %>%
+  distinct(SID) %>%
+  nrow() #207
+pps_cpe_obs_n <- tvn_wide %>% filter(study == "PPS_CPE") %>% nrow()
+
+cog_sample_n <- tvn_wide %>% 
+  filter(study == "Soc-Cog") %>%
+  group_by(SID) %>%
+  distinct(SID) %>%
+  nrow() #116
+cog_obs_n <- 0 #lol no DIAMONDS
+```
+
+Now get the variables we need
+
+```{r}
+#lagged baseline
+baseline_corr_lag <- tvn_baseline_variables %>%
+  select(SID, study, race_ethnicity, gender,  
+         contains("composite")) %>%
+  left_join(tvn_data_bw %>%
+              select(SID, bandwidth)) %>%
+  filter(!is.na(bandwidth)) %>%
+  rename(bw_lag = bandwidth) %>%
+  select(SID, study, race_ethnicity, gender, bw_lag, everything()) %>%
+  mutate(study = factor(study))
+
+#contrasts using sample n
+contrasts(baseline_corr_lag$study) <- matrix(data = c(-(pps_cpe_sample_n/ipcs_sample_n),
+                                                      -(cog_sample_n/ipcs_sample_n),
+                                                      1, 0, 0, 1),
+                                             nrow = 3, ncol = 2,
+                                             byrow = TRUE)
+contrasts(baseline_corr_lag$study) 
+
+#lagged momentary
+momentary_corr_lag <- tvn_baseline_variables %>%
+  select(SID, study) %>%
+  left_join(tvn_data_bw %>%
+              select(SID, bandwidth)) %>%
+  filter(!is.na(bandwidth)) %>%
+  rename(bw_lag = bandwidth) %>%
+  left_join(tvn_wide_sit) %>% #diamonds  parameters 
+  mutate(study = factor(study)) 
+
+#contrasts using sample n
+contrasts(baseline_corr_lag$study) <- matrix(data = c(-(pps_cpe_obs_n/ipcs_obs_n),
+                                                      -(cog_obs_n/ipcs_obs_n),
+                                                      1, 0, 0, 1),
+                                             nrow = 3, ncol = 2,
+                                             byrow = TRUE)
+contrasts(baseline_corr_lag$study) 
+
+#con baseline
+baseline_corr_con <- tvn_baseline_variables %>%
+  select(SID, study, race_ethnicity, gender,  
+         contains("composite")) %>%
+  left_join(tvn_contemp_bw %>%
+              select(SID, bandwidth)) %>%
+  filter(!is.na(bandwidth)) %>%
+  rename(bw_con = bandwidth) %>%
+  select(SID, study, race_ethnicity, gender, bw_con, everything()) %>%
+  mutate(study = factor(study))
+
+#contrasts using sample n
+contrasts(baseline_corr_con$study) <- matrix(data = c(-(pps_cpe_sample_n/ipcs_sample_n),
+                                                      -(cog_sample_n/ipcs_sample_n),
+                                                      1, 0, 0, 1),
+                                             nrow = 3, ncol = 2,
+                                             byrow = TRUE)
+contrasts(baseline_corr_con$study) 
+
+#con momentary
+momentary_corr_con <- tvn_baseline_variables %>%
+  select(SID, study) %>%
+  left_join(tvn_contemp_bw %>%
+              select(SID, bandwidth)) %>%
+  filter(!is.na(bandwidth)) %>%
+  rename(bw_con = bandwidth) %>%
+  left_join(tvn_wide_sit) %>% #diamonds  parameters 
+  mutate(study = factor(study)) 
+
+#contrasts using sample n
+contrasts(momentary_corr_con$study) <- matrix(data = c(-(pps_cpe_obs_n/ipcs_obs_n),
+                                                      -(cog_obs_n/ipcs_obs_n),
+                                                      1, 0, 0, 1),
+                                             nrow = 3, ncol = 2,
+                                             byrow = TRUE)
+contrasts(momentary_corr_con$study)
+```
+
+Lagged Bivariate Bayesian Regressions
+
+Lagged: baseline and momentary
+
+```{r, include = FALSE, warning=FALSE}
+# Define the list of predictor variables
+baseline_predictors <- c("race_ethnicity", "gender", "E_composite", "A_composite", 
+                         "C_composite", "N_composite", "O_composite", "CESD_composite", 
+                         "SWL_composite", "ER_R_composite", "ER_S_composite")
+
+# Run separate regressions for each predictor
+plan(multisession, workers = availableCores() - 1)
+
+baseline_lag_models <- future_map(baseline_predictors, function(var) {
+  brm(
+    formula = as.formula(paste("bw_lag ~", var, "+ study")),
+    data = baseline_corr_lag,
+    family = gaussian(),
+    prior = set_prior("normal(0,1)", class = "b"),
+    chains = 4, iter = 2000, cores = 4,
+    backend = "cmdstanr"
+  )
+})
+
+names(baseline_lag_models) <- baseline_predictors
+
+
+# momentary predictors
+momentary_predictors <- c(
+  "Dut_sd", "Dut_mssd", "I_sd", "I_mssd", "A_sd", "A_mssd",
+  "M_sd", "M_mssd", "O_sd", "O_mssd", "N_sd", "N_mssd",
+  "Dec_sd", "Dec_mssd", "S_sd", "S_mssd")
+
+#model
+momentary_lag_models <- future_map(momentary_predictors, function(var) {
+  brm(
+    formula = as.formula(paste("bw_lag ~", var, "+ study")),
+    data = momentary_corr_lag,
+    family = gaussian(),
+    prior = set_prior("normal(0,1)", class = "b"),
+    chains = 4, iter = 2000, cores = 4,
+    backend = "cmdstanr"
+  )
+})
+
+names(momentary_lag_models) <- momentary_predictors
+```
+
+Contemporaneous models
+
+```{r, include = FALSE, warning = FALSE}
+#baseline
+baseline_con_models <- future_map(baseline_predictors, function(var) {
+  brm(
+    formula = as.formula(paste("bw_con ~", var, "+ study")),
+    data = baseline_corr_con,
+    family = gaussian(),
+    prior = set_prior("normal(0,1)", class = "b"),
+    chains = 4, iter = 2000, cores = 4,
+    backend = "cmdstanr"  # Uses CmdStan for faster sampling (if available)
+  )
+})
+names(baseline_con_models) <- baseline_predictors
+
+momentary_con_models <- future_map(momentary_predictors, function(var) {
+  brm(
+    formula = as.formula(paste("bw_con ~", var, "+ study")),
+    data = momentary_corr_con,
+    family = gaussian(),
+    prior = set_prior("normal(0,1)", class = "b"),
+    chains = 4, iter = 2000, cores = 4,
+    backend = "cmdstanr"  # Uses CmdStan for faster sampling (if available)
+  )
+})
+names(momentary_con_models) <- momentary_predictors
+
+#make it dataframe and combine lag and con
+bw_models_df <- tibble(
+  predictors = c(baseline_predictors, momentary_predictors),
+  lag_models = c(baseline_lag_models, momentary_lag_models),
+  con_models = c(baseline_con_models, momentary_con_models)
+)
+save(bw_models_df, file = "Data/bw_models_df.RData")
+```
+
+Standardize parameters
+
+```{r, include = FALSE}
+# #this is for the table
+# bw_corr_nested <- bw_models_df %>%
+#   mutate(lag_corr = future_map(lag_models, effectsize::standardize_parameters),
+#          con_corr = future_map(con_models, effectsize::standardize_parameters)
+#   )
+# 
+# save(bw_corr_nested, file = "Data/bw_corr_nested.RData")
+
+#this is for the figure
+bw_corr_standardized <- bw_models_df %>%
+  mutate(lag_corr = future_map(lag_models, effectsize::standardize_parameters),
+         con_corr = future_map(con_models, effectsize::standardize_parameters)
+  ) %>%
+  unnest(c(lag_corr, con_corr), names_sep = "_") %>%
+  select(-contains("Component"), -predictors, -con_corr_Parameter) %>% #clean it up
+  
+  rename(Parameter = lag_corr_Parameter) %>%
+  mutate_if(is.numeric, ~round(.,2)) %>%
+  mutate(Parameter = gsub("b_race_ethnicity|b_gender", "", Parameter),
+         Parameter = gsub("b_", "", Parameter),
+         Parameter = ifelse(Parameter == "study1", "PPS + CPE", Parameter),
+         Parameter = ifelse(Parameter == "study2", "Soc-Cog", Parameter),
+         Parameter = ifelse(Parameter == "studyPPS_CPE", "PPS + CPE", Parameter),
+         Parameter = ifelse(Parameter == "AmericanIndian", "American Indian", Parameter),
+         Parameter = ifelse(Parameter == "EastAsian", "East Asian", Parameter),
+         Parameter = ifelse(Parameter == "SouthAsian", "South Asian", Parameter),
+         Parameter = ifelse(Parameter == "NonMBinary", "Non-Binary", Parameter),
+         Parameter = ifelse(Parameter == "Other_race", "Other", Parameter),
+         Parameter = ifelse(Parameter == "Other_gender", "Other", Parameter)) %>% 
+  filter(Parameter != "Intercept",
+         Parameter != "sigma",
+         Parameter != "PPS + CPE",
+         Parameter != "Soc-Cog") %>%
+  mutate(Parameter = factor(Parameter, levels = rev(unique(Parameter)))) #so it goes from demo to baseline 
+
+save(bw_corr_standardized, file = "Data/bw_corr_standardized.RData")
+```

@@ -1,0 +1,333 @@
+---
+title: "1_1. TVN Preparation"
+format: html
+editor: visual
+---
+
+```{r, include = FALSE}
+library(furrr)
+library(data.table)
+library(tidyverse)
+
+wd <- getwd()
+set.seed(420)
+```
+
+Read in data from all four studies and stack
+
+```{r}
+load("Data/ipcs_wide.RData") 
+load("Data/pp_wide.RData") 
+load("Data/cpe_wide.RData") 
+load("Data/cog_wide.RData") 
+
+data_wide <- bind_rows(ipcs_wide,
+                       pp_wide,
+                       cpe_wide,
+                       cog_wide)
+
+#no redundancies
+data_wide %>%
+  distinct(SID, study) %>%  # Keep unique SID-study combinations
+  group_by(SID) %>%         # Group by SID
+  filter(n() > 1)  
+
+table(is.na(data_wide)) #NAs are soc-cog DIAMONDS (10014*8)
+
+```
+
+We need dayno, beepno, and time_norm for tvn analyses
+
+Mutate startDate, dayno, and clean hourblock columns
+
+We want the subsequent dayno to start AFTER hourblock1. so if someone answered at midnight but their hourblock1 is 8 it should go into the previous day
+
+```{r}
+data <- data_wide %>%
+  group_by(SID) %>%
+  mutate(StartDate = min(Date),
+         dayno = as.numeric((as.Date(Date) - as.Date(StartDate))+1)) %>%
+  ungroup() %>%
+  mutate(dayno = ifelse(Hour < HourBlock1, dayno - 1, dayno), 
+         dayno = ifelse(dayno == 0, 1, dayno)) %>% #some got turned into 0s; this doesnt mess anything up
+  group_by(SID, dayno) %>%
+  mutate(HourBlock = 1:length(dayno)) %>%
+  ungroup() %>%
+  select(SID, Date, Hour, HourBlock, dayno, HourBlock1, everything())
+
+length(unique(data$SID)) #392
+
+table(is.na(data)) #80112; cog DIAMONDS
+
+table(data$HourBlock)
+```
+
+There are a handful of participants with hourblock \>5. separate them and calculate the time variables separately
+
+```{r}
+hourblockoddids <- data %>%
+  filter(HourBlock > 5) 
+
+#separate them out
+data_hourblock_odd <- data %>%
+  filter(SID %in% hourblockoddids$SID)
+
+#now remove them
+'%nin%' <- function(x,y)!('%in%'(x,y))
+
+data <- data %>%
+  filter(SID %nin% hourblockoddids$SID)
+
+#make sure we didnt lose any homies
+nrow(data)+nrow(data_hourblock_odd)==nrow(data_wide)
+
+range(data$HourBlock)
+```
+
+Now, create beepno. To do this, we need to include missed surveys as rows and then just count from first to last survey participant received
+
+```{r}
+shit <- data %>%
+  group_by(SID) %>%
+  reframe(
+  SID = unique(SID),
+  dayno = rep(1:max(dayno), each = 5), #max number, ipcs and cog are 5
+  beepno = seq(from = 1, to = (max(dayno)*5), by = 1),
+  max_day = max(dayno),
+  HourBlock = rep(1:5, max(dayno))
+) %>%
+  ungroup()
+
+#any row discrepancy? no cause i cut above peeps 
+test <- anti_join(data, shit)
+
+#join by SID, hourblock, dayno with new shit and add columns to create datetimes
+pp_too_many <- data %>%
+  full_join(shit) %>% # join existing data with "perfect"/full data by sid, hourblock, dayno
+  arrange(SID, beepno, HourBlock) %>%
+  group_by(SID) %>%
+  mutate(StartDate = ifelse(is.na(StartDate), first(StartDate[!is.na(StartDate)]), StartDate),
+         StartDate = as.POSIXct(StartDate),
+         HourBlock1 = ifelse(is.na(HourBlock1), first(HourBlock1[!is.na(HourBlock1)]), HourBlock1),
+         DateOnly = as_date(StartDate) + lubridate::days(dayno) - days(1),
+         DateOnly = as.POSIXct(DateOnly),
+         Hour = ifelse(is.na(Hour), HourBlock1 + (HourBlock-1)*5, Hour)) %>% #multiply by 5 cause that's max surveys per day across studies
+  ungroup() %>%
+  arrange(SID, beepno)
+
+table(pp_too_many$Hour > 23)
+
+
+```
+
+```{r}
+length(na.omit(pp_too_many$Date)) #29572, same number as og df
+
+check <- pp_too_many %>% filter(Hour>23)
+table(is.na(check$Sociability)) #all are empty, padded rows
+
+table(is.na(pp_too_many$Sociability))
+#same number of rows
+#there are more NAs in pp_too_many than there are rows with hour > 23. This means that there are padded rows that were less than 23 which is fine
+```
+
+Convert dates to the next day if hour is \>23 aka the next day and hours to less than 24; these are exclusively NA rows which will be cut as shown in above code chunk
+
+Then make full date and replace NA dates with actual dates
+
+```{r}
+pp_too_many$DateOnly[pp_too_many$Hour > 23] <- pp_too_many$DateOnly[pp_too_many$Hour > 23] + days(1) # some day blocks span days
+pp_too_many$Hour[pp_too_many$Hour > 23] <- pp_too_many$Hour[pp_too_many$Hour > 23] - 24 # some day blocks span days
+table(pp_too_many$Hour) #there are some 24 and 27, but they are all NAs i checked
+
+
+#make full date baby
+pp_too_many <- pp_too_many %>% 
+  mutate(Full_Date = sprintf("%s %s:%s:%s", as.character(DateOnly), Hour, "00", "00"))
+#turn full date into posixct; the failed too parse dates are the people with hours that are equal to 24 and 27
+pp_too_many <- pp_too_many %>%
+  mutate(Full_Date = ymd_hms(Full_Date))
+
+
+class(pp_too_many$Full_Date)
+table(is.na(pp_too_many$Full_Date))
+
+length(na.omit(pp_too_many$Date))
+
+
+
+#finally replace NA dates
+pp_too_many <- pp_too_many %>%
+  mutate(Date = fifelse(is.na(Date), Full_Date, Date)) %>%
+  filter(!is.na(Full_Date))
+
+```
+
+Transform Date into timenorm variable
+
+Using fill makes the NA row use the same exact date and time which fucks up timenorm
+
+```{r}
+#function to timenorm
+timenorm <- function(x){
+  y <- as.numeric(x)
+  t <- (y - min(y))/(max(y) - min(y))
+  return(t)
+}
+
+data <- pp_too_many %>%
+  group_by(SID) %>%
+  mutate(time_norm = timenorm(Date)) %>%
+  ungroup()
+
+table(is.na(data$time_norm))
+
+#ok, i got coooked doing the time series descriptives foor data vis. check the range of time_norm for each mf
+
+norm_check <- data %>%
+  group_by(SID) %>%
+  summarize(time_sd = sd(time_norm))
+
+range(norm_check$time_sd) #so the bad time_noorm was in hourblock oddities. use this as a typical value (.28-.3)
+```
+
+Only relevant variables . also tibble it
+
+```{r}
+data_nested <- data %>% 
+  filter(!is.na(Sociability)) %>% #keep cog, if i do straight na.omit it cuts them all cause DIAMODNS
+  select(-c(Hour, HourBlock, HourBlock1, StartDate, DateOnly, Full_Date, max_day)) %>%
+  select(SID, Date, dayno, beepno, time_norm, everything()) %>%
+  group_by(SID, study) %>%
+  nest() %>%
+  ungroup() 
+
+data_wide <- data_nested %>% unnest()
+
+table(is.na(data_wide)) #ohh its less than 80112 cause some of those are in the odd df
+
+#WERE ALL GOOD. NO NAS HERE
+check <- data_wide %>%
+  filter(if_any(SID:CrtvImagination, is.na))
+```
+
+Now for the hourblock oddities
+
+```{r}
+shit <- data_hourblock_odd %>%
+  group_by(SID) %>%
+  reframe(
+  SID = unique(SID),
+  dayno = rep(1:max(dayno), each = max(HourBlock)), #hourblock is cooked so gotta max out within person
+  beepno = seq(from = 1, to = (max(dayno)*max(HourBlock)), by = 1),
+  max_day = max(dayno),
+  HourBlock = rep(1:max(HourBlock), max(dayno))
+) %>%
+  ungroup()
+
+#any row discrepancy? no cause i cut above peeps 
+test <- anti_join(data_hourblock_odd, shit)
+
+#join by SID, hourblock, dayno with new shit and add columns to create datetimes
+pp_too_many_odd <- data_hourblock_odd %>%
+  full_join(shit) %>%  # join existing data with "perfect"/full data by sid, hourblock, dayno
+  arrange(SID, beepno, HourBlock) %>%
+  group_by(SID) %>%
+  mutate(StartDate = ifelse(is.na(StartDate), first(StartDate[!is.na(StartDate)]), StartDate),
+         StartDate = as.POSIXct(StartDate),
+         HourBlock1 = ifelse(is.na(HourBlock1), first(HourBlock1[!is.na(HourBlock1)]), HourBlock1),
+         DateOnly = as_date(StartDate) + lubridate::days(dayno) - days(1),
+         DateOnly = as.POSIXct(DateOnly),
+         Hour = ifelse(is.na(Hour), HourBlock1 + (HourBlock-1)*max(HourBlock), Hour)) %>% 
+  ungroup() %>%
+  arrange(SID, beepno)
+
+table(pp_too_many_odd$Hour > 23)
+
+length(na.omit(pp_too_many_odd$Date)) #same as original data_hourblock_odd df
+
+#look at Hour>23
+kms <- pp_too_many_odd %>% filter(Hour>23) 
+table(is.na(kms$Sociability))
+
+# pp_too_many_odd$DateOnly[pp_too_many_odd$Hour > 23] <- pp_too_many$DateOnly[pp_too_many_odd$Hour > 23] + days(1) # some day blocks span days
+# pp_too_many_odd$Hour[pp_too_many_odd$Hour > 23] <- pp_too_many_odd$Hour[pp_too_many_odd$Hour > 23] - 24 # some day blocks span days
+# table(pp_too_many_odd$Hour)
+#cut
+pp_too_many_odd <- pp_too_many_odd %>%
+  filter(Hour<24)
+
+#make full date baby
+pp_too_many_odd <- pp_too_many_odd %>% 
+  mutate(Full_Date = sprintf("%s %s:%s:%s", as.character(DateOnly), Hour, "00", "00"))
+#turn full date into posixct
+pp_too_many_odd <- pp_too_many_odd %>%
+  mutate(Full_Date = ymd_hms(Full_Date))
+
+
+table(is.na(pp_too_many_odd$Full_Date))
+
+
+#finally replace NA dates
+pp_too_many_odd <- pp_too_many_odd %>%
+  mutate(Date = fifelse(is.na(Date), Full_Date, Date))%>%
+  filter(!is.na(Full_Date))
+
+data_hourblock_odd <- pp_too_many_odd %>%
+  group_by(SID) %>%
+  mutate(time_norm = timenorm(Date)) %>%
+  ungroup()
+
+#TIME NORM CHECK JFC 
+norm_check_odd <- data_hourblock_odd %>%
+  group_by(SID) %>%
+  summarize(time_sd = sd(time_norm))
+
+range(norm_check_odd$time_sd) #LETS FARKING GO
+
+data_odd_nested <- data_hourblock_odd %>% 
+  filter(!is.na(Sociability)) %>% #keep cog, if i do straight na.omit it cuts them all cause DIAMODNS
+  select(-c(Hour, HourBlock, HourBlock1, StartDate, DateOnly, Full_Date, max_day)) %>%
+  select(SID, Date, dayno, beepno, time_norm, everything()) %>%
+  group_by(SID, study) %>%
+  nest() %>%
+  ungroup() 
+
+data_odd_wide <- data_odd_nested %>% unnest()
+
+check <- data_odd_wide %>%
+  filter(if_any(SID:CrtvImagination, is.na)) #NONE FU
+
+
+```
+
+Combine
+
+```{r}
+tvn_wide <-  bind_rows(data_wide, data_odd_wide) %>%
+  mutate(study = ifelse(study %in% c("PPS", "CPE"), "PPS_CPE", study))
+
+#nested
+tvn_data <- tvn_wide %>%
+  arrange(study, SID) %>%
+  group_by(SID, study) %>%
+  nest() %>%
+  mutate(obs = map_vec(data, nrow)) %>%
+  ungroup()
+
+#check
+check <- data_wide %>%
+  filter(if_any(SID:CrtvImagination, is.na))
+
+#list just for ts plots
+tvn_list <- split(tvn_wide, unique(tvn_wide$SID))
+
+```
+
+Save this holy mother of god
+
+```{r}
+save(tvn_list, file = "Data/tvn_list.RData")
+save(tvn_wide, file = "Data/tvn_wide.RData")
+save(tvn_data, file = "Data/tvn_data.RData")
+```

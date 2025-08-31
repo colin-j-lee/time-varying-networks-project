@@ -1,0 +1,293 @@
+---
+title: "0_3. Data Preparation CPE"
+author: "Colin J Lee"
+format: 
+  html:
+    code-tools: true
+    code-copy: true
+    code-line-numbers: true
+    code-link: true
+    theme: united
+    highlight-style: tango
+    df-print: paged
+    code-fold: show
+    toc: true
+    toc-float: true
+    self-contained: true
+---
+
+```{r, include = FALSE}
+library(lubridate)
+library(janitor)
+library(Amelia)
+library(plyr)
+library(psych)
+library(lavaan)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Read in data and codebooks
+
+```{r, codebook and data, include = FALSE}
+load("Raw Data/cpe_raw.RData")
+
+cpe_wide <- cpe_raw %>%
+  select(-HourBlock, -Day) %>%
+  select(SID:Hour, HourBlock1, everything())
+
+cpe_codebook <- sprintf("%s/Codebooks/cpe_codebook.xlsx", wd) %>%
+  readxl::read_xlsx(., sheet = "ESM")
+
+#initial ids for demographics
+cpe_ids_pre <- unique(cpe_wide$SID)
+
+save(cpe_ids_pre, file = "Data/cpe_ids_pre.RData")
+
+```
+
+Clean up codebooks
+
+```{r}
+cpe_codebook <- cpe_codebook %>%
+  row_to_names(row_number = 1)
+
+#remove all rows not related to traits, emotions, and DIAMONDS
+#and remove sad and anxiety emotion, redundant with neuroticism
+cpe_codebook <- cpe_codebook[-c(61:63,72:74, 89:218),]
+```
+
+
+```{r, clean and min assessments}
+### how many participants initially in dataset?
+cpe_wide %>%
+  group_by(SID) %>%
+  distinct(SID) %>%
+  nrow() #282
+
+# Min 50 obs
+cpe_wide <- cpe_wide %>%
+  group_by(SID) %>%
+  filter(n() >= 50) %>% 
+  arrange(SID, Date) %>%
+  mutate(all_beeps = seq(1, n(), 1)) %>%
+  ungroup()
+
+length(unique(cpe_wide$SID)) #113
+
+survey_count <- cpe_wide %>% group_by(SID) %>% count() %>% ungroup() %>% arrange(n)
+
+```
+
+
+IMPUTATION TIME BABY
+
+```{r, multiple imputation}
+cpe_mi <- data.frame(unclass(cpe_wide %>% select(-Date, -Hour, -HourBlock1)))
+
+cpe_mi <- amelia(cpe_mi, m = 1, ts = "all_beeps", cs = "SID")$imputations[[1]] %>%
+  as_tibble() %>%
+  full_join(cpe_wide %>% select(SID, Date, Hour, HourBlock1, all_beeps)) %>%
+  select(-all_beeps); cpe_mi
+
+# check ranges after imputation
+describe(cpe_mi) # min and max values outside of 1-5 range
+
+# restrict range of state values after MI
+pp <- cpe_mi[,3:17]
+pp[ pp > 5 ] <- 5
+pp[ pp < 1] <- 1
+
+sits <- cpe_mi[,18:25]
+sits[ sits > 3 ] <- 3
+sits[ sits < 1] <- 1
+
+#recombine
+cpe_mi_range <- cbind(cpe_mi$SID, cpe_mi$Date, cpe_mi$Hour, cpe_mi$HourBlock1, pp)
+cpe_mi_range_sit <- cbind(cpe_mi$SID, cpe_mi$Date, cpe_mi$Hour, cpe_mi$HourBlock1, pp, sits)
+
+#order columns
+cpe_mi_range <- cpe_mi_range %>%
+  select(`cpe_mi$SID`, `cpe_mi$Date`, `cpe_mi$Hour`, `cpe_mi$HourBlock1`,
+         E_scblty, E_enerLev, E_assert, A_trust, A_rspct, A_cmpn,
+         C_prdctv, C_rspnsbl, C_org, N_dep, N_anx, N_emoVol, O_intCur, O_aesSens, O_crtvImag)
+cpe_mi_range_sit <- cpe_mi_range_sit %>%
+  select(`cpe_mi$SID`, `cpe_mi$Date`, `cpe_mi$Hour`, `cpe_mi$HourBlock1`,
+         E_scblty, E_enerLev, E_assert, A_trust, A_rspct, A_cmpn,
+         C_prdctv, C_rspnsbl, C_org, N_dep, N_anx, N_emoVol, O_intCur, O_aesSens, O_crtvImag,
+         D1:D8)
+
+```
+
+```{r}
+colnames(cpe_mi_range) <- c("SID", "Date", "Hour", "HourBlock1", "Sociability", "EnergyLevel", "Assertive", "Trust", "Respect", "Compassion", "Productivity", "Responsibility", "Organization", "Depression", "Anxiety", "EmotionalVol", "IntCuriosity", "AesthSense", "CrtvImagination")
+
+sit_names <- c("Duty", "Intellect", "Adversity", "Mating", "pOsitivity", "Negativity", "Deception", "Sociality")
+
+
+colnames(cpe_mi_range_sit) <- c("SID", "Date", "Hour", "HourBlock1", "Sociability", "EnergyLevel", "Assertive", "Trust", "Respect", "Compassion", "Productivity", "Responsibility", "Organization", "Depression", "Anxiety", "EmotionalVol", "IntCuriosity", "AesthSense", "CrtvImagination", sit_names)
+
+
+
+cpe_wide <- cpe_mi_range
+cpe_wide_sit <- cpe_mi_range_sit
+rm(pp, cpe_mi, cpe_mi_range)
+
+describe(cpe_wide) 
+describe(cpe_wide_sit)
+```
+
+```{r, POMP}
+pomp <- function(x, na){
+  (x - min(x, na.rm = na))/(max(x, na.rm = na) - min(x, na.rm = na))*100
+} 
+
+cpe_wide <- cpe_wide %>%
+  mutate(
+    Sociability = pomp(Sociability, TRUE)
+    , EnergyLevel =  pomp(EnergyLevel, TRUE)
+    , Assertive =  pomp(Assertive, TRUE)
+    , Trust =  pomp(Trust, TRUE)
+    , Respect =  pomp(Respect, TRUE)
+    , Compassion =  pomp(Compassion, TRUE)
+    , Productivity =  pomp(Productivity, TRUE)
+    , Responsibility =  pomp(Responsibility, TRUE)
+    , Organization =  pomp(Organization, TRUE)
+    , Depression =  pomp(Depression, TRUE)
+    , Anxiety =  pomp(Anxiety, TRUE)
+    , EmotionalVol =  pomp(EmotionalVol, TRUE)
+    , IntCuriosity =  pomp(IntCuriosity, TRUE)
+    , AesthSense =  pomp(AesthSense, TRUE)
+    , CrtvImagination =  pomp(CrtvImagination, TRUE)
+  ) %>% 
+  ungroup()
+
+```
+
+POMP situations df
+
+```{r}
+cpe_wide_sit <- cpe_wide_sit %>%
+  mutate(
+    Sociability = pomp(Sociability, TRUE)
+    , EnergyLevel =  pomp(EnergyLevel, TRUE)
+    , Assertive =  pomp(Assertive, TRUE)
+    , Trust =  pomp(Trust, TRUE)
+    , Respect =  pomp(Respect, TRUE)
+    , Compassion =  pomp(Compassion, TRUE)
+    , Productivity =  pomp(Productivity, TRUE)
+    , Responsibility =  pomp(Responsibility, TRUE)
+    , Organization =  pomp(Organization, TRUE)
+    , Depression =  pomp(Depression, TRUE)
+    , Anxiety =  pomp(Anxiety, TRUE)
+    , EmotionalVol =  pomp(EmotionalVol, TRUE)
+    , IntCuriosity =  pomp(IntCuriosity, TRUE)
+    , AesthSense =  pomp(AesthSense, TRUE)
+    , CrtvImagination =  pomp(CrtvImagination, TRUE)
+  ) %>% 
+  ungroup()
+
+# cpe_wide_sit[,3:17] <- round(cpe_wide_sit[,3:17], 2)
+```
+
+```{r, check}
+describe(cpe_wide)
+# No NAs/NANs/Infs
+sum(is.na(cpe_wide)) #0
+sum(apply(cpe_wide,2,is.nan)) #0
+sum(apply(cpe_wide,2,is.infinite)) #0
+sum(cpe_wide < 0) #0
+```
+
+LOOK AT VARIABLE VARIANCES
+
+Descriptives
+
+```{r, warning = FALSE}
+#make it long
+cpe_long <- cpe_wide %>%
+  pivot_longer(
+    cols = Sociability:CrtvImagination
+    , names_to = c("facet")
+    , values_to = "value"
+  ) %>%
+  arrange(SID, Date)
+
+# function for mean, sd, median, min, max, n, n missing
+descriptive_fun <- function(df, var) {
+  df %>%
+  summarize(
+      mean = mean({{ var }},   na.rm = TRUE),
+      sd     = sd({{ var }},     na.rm = TRUE),
+      median = median({{ var }}, na.rm = TRUE),
+      min    = min({{ var }},    na.rm = TRUE),
+      max    = max({{ var }},    na.rm = TRUE),
+      mode = DescTools::Mode({{ var }},    na.rm = TRUE),
+      # omega  = omega({{var}}),
+      # alpha  = alpha({{var}}),
+      n      = n(),
+      .groups = "drop"
+      )
+}
+
+cpe_descriptives <- cpe_long %>%
+  group_by(SID, facet) %>% # we want descriptive for each trait for each participant
+  descriptive_fun(var = value) %>% 
+  ungroup()
+
+```
+
+Look at no variance participant-variables
+
+```{r}
+cpe_no_var <- cpe_descriptives %>%
+  filter(sd == 0)  #fuck
+cpe_no_var
+
+#cut em
+'%nin%' <- function(x,y)!('%in%'(x,y))
+cpe_wide <- cpe_wide %>%
+  filter(SID %nin% cpe_no_var$SID) 
+
+cpe_wide_sit <- cpe_wide_sit %>%
+  filter(SID %nin% cpe_no_var$SID) 
+```
+
+Look at low variance participant-variables
+
+```{r}
+cpe_descriptives %>%
+  filter(sd < 10) 
+```
+
+Look at median = 0 or 100
+
+```{r}
+cpe_descriptives %>%
+  filter(median == 0 | median == 100)
+# alot of median = 0. or 100 but chill variance
+```
+
+
+```{r}
+#make names across sample consistent. and i want the situation variables, and i want study v
+cpe_wide <- cpe_wide_sit %>%
+  mutate(study = "CPE")
+
+table(is.na(cpe_wide))
+
+
+#post ids for demographics
+cpe_ids_post <- unique(cpe_wide$SID)
+
+save(cpe_ids_post, file = "Data/cpe_ids_post.RData")
+```
+
+```{r, save}
+save(cpe_wide, file = "Data/cpe_wide.RData")
+save(cpe_no_var, file = "Data/cpe_no_var.RData")
+```

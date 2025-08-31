@@ -1,0 +1,96 @@
+---
+title: "4. Time-Varying vs. Stationary Tests"
+format: html
+editor: visual
+---
+
+```{r}
+# ----------------------------------------------------------------------------------
+# ----------------------- 5) Time-varying or not? A Bootstrap test -----------------
+# ----------------------------------------------------------------------------------
+
+
+# ----- A) Fit once time-varying on actual data  -----------------------------------
+
+# Get RMSE from time-varying model
+pred_emp <- predict(object = tvvar_obj, 
+                    data = mood_data, 
+                    tvMethod = "closestModel")
+
+error_emp <- mean(pred_emp$errors$RMSE)
+
+
+
+# ----- B) Fit stationary model to be able to simulate data ------------------------
+
+var_obj <- mvar(data = mood_data,
+                type = rep("g", 12),
+                level = rep(1, 12), 
+                lambdaSel = "CV",
+                timepoints = time_data$time_norm, 
+                lags = 1,
+                beepvar = time_data$beepno,
+                dayvar = time_data$dayno,
+                scale = TRUE,
+                pbar = TRUE)
+?mvar
+
+# ----- C) Fit time-varying model to stationary data -------------------------------
+
+#multilevel VAR estimation: temporal effects, contemporaneous, and between subjects
+library(mlVAR)
+?mlVAR
+
+# Generate data
+n <- 876 #numer of efficient data points, see above
+nIter <- 100
+
+l_data <- list()
+l_model <- list()
+l_meanerror <- rep(NA, nIter)
+
+# get parameters out of model object
+pars <- var_obj$wadj[, , 1]
+pars[var_obj$edgecolor=="red"] <- pars[var_obj$edgecolor=="red"] * -1
+intercepts <- unlist(var_obj$intercepts)
+
+for(i in 1:nIter) {
+  
+  l_data[[i]] <- simulateVAR(pars = pars, 
+                             means = intercepts, 
+                             Nt = n, 
+                             residuals = 1)  
+  
+  l_model[[i]] <- tvmvar(data = l_data[[i]],
+                         type = rep("g", 12),
+                         level = rep(1, 12), 
+                         lambdaSel = "CV",
+                         timepoints = 1:n, 
+                         estpoints = seq(0, 1, length = 20), 
+                         bandwidth = bandwidth,
+                         lags = 1,
+                         scale = TRUE,
+                         pbar = FALSE, 
+                         signInfo = FALSE)
+  
+  pred_res <- predict(object = l_model[[i]], 
+                      data = l_data[[i]], 
+                      tvMethod = "closestModel")
+  l_meanerror[i] <- mean(pred_res$errors$RMSE)
+  
+  print(i)
+  
+} # end for: i
+
+
+# saveRDS(l_model, file="l_model.RDS")
+# saveRDS(l_meanerror, file="l_meanerror.RDS")
+
+
+# ----- D) Evaluate ----------------------------------------------------------------
+
+hist(l_meanerror, xlim=c(0.9, 1)) # sampling distribution under H0
+abline(v = error_emp, col="red") # empirical error
+
+# Conclusion: significant by essentially any alpha-level
+```

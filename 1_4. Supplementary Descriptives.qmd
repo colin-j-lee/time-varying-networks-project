@@ -1,0 +1,573 @@
+---
+title: "1_4. Supplementary Descriptives"
+format: html
+editor: visual
+---
+
+```{r, include=FALSE}
+library(plyr)
+library(lavaan)
+library(MVN)
+library(psych)
+library(multilevelTools)
+library(furrr)
+library(kableExtra)
+library(scales)
+library(tidyverse)
+
+wd <- getwd()
+setwd(wd)
+set.seed(420)
+
+
+#load prepped data
+load(sprintf("%s/Data/tvn_wide.RData", wd)) #wide
+load(sprintf("%s/Data/tvn_data.RData", wd)) #nested
+load(sprintf("%s/Data/tvn_baseline_variables.RData", wd)) #baseline vars
+
+#comb pps cpe
+tvn_baseline_variables <- tvn_baseline_variables %>%
+  mutate(study = ifelse(study %in% c("PPS", "CPE"), "PPS_CPE", study))
+#combine esm and baseline 
+tvn_wide_base <- tvn_wide %>%
+  left_join(tvn_baseline_variables) 
+
+```
+
+SUPPLEMENTARY Correlation Matrices OF ALL VARIABLES
+
+```{r}
+#relevant variables
+tvn_wide_base_relevant <- tvn_wide_base %>%
+    select(SID, study, Sociability:Sociality, contains("composite"))
+
+#function to calc
+corr_fun <- function(d){
+  desc <- d %>%
+    pivot_longer(
+        cols = -SID
+      , values_to = "value"
+      , values_drop_na = T
+      , names_to = "v1"
+    ) %>%
+    group_by(v1) %>%
+    summarize_at(vars(value), lst(mean, sd)) %>%
+    ungroup() %>%
+    mutate_at(vars(mean, sd), ~sprintf("%.2f", .))
+  
+  r <- corr.test(d %>% select(-SID), use = "pairwise") 
+  r2 <- apply(r$r, c(1,2), function(x) sprintf("%.2f", x))
+  r2[which(r$p < .05, arr.ind = T)] <- sprintf("<strong>%s</strong>", r2[which(r$p < .05, arr.ind = T)])
+  
+  r2[upper.tri(r2)] <- ""
+  diag(r2) <- "--"
+  
+  r_df <- r2 %>%
+    data.frame() %>%
+    rownames_to_column("v1") %>%
+    # left_join(desc) %>%
+    mutate(v1 = paste(seq(1, n()), v1, sep = ". "))
+}
+
+ipcs_corr <- tvn_wide_base_relevant %>% filter(study == "IPCS") %>% select(-study)
+pp_corr <- tvn_wide_base_relevant %>% filter(study == "PPS_CPE") %>% select(-study)
+cog_corr <- tvn_wide_base_relevant %>% filter(study == "Soc-Cog") %>% select(-study) 
+
+ipcs_corr_mat <- corr_fun(d = ipcs_corr)
+pps_corr_mat <- corr_fun(d = pp_corr)
+cog_corr_mat <- corr_fun(d = cog_corr)
+
+# Combine the data frames by stacking them vertically
+all_cor <- bind_rows(ipcs_corr_mat, pps_corr_mat, cog_corr_mat) %>%
+  rename(" " = v1) %>%
+  mutate(across(where(is.character), ~ if_else(. == "NA", "-", .)))
+
+#number of rows
+n <- 32
+#table
+all_cor %>%
+    kable(.
+          , "html"
+          , escape = F
+          , caption = ("<strong>Table SX</strong><br><em>Zero-Order Between-Person Correlations Across All Studies</em>") #and Descriptives
+          , col.names = c("Variable", 1:(ncol(all_cor)-1))#, "M", "SD")
+          , align = c("l", rep("c", ncol(all_cor) - 1))
+    ) %>%
+  pack_rows("IPCS", 1, n) %>%
+  pack_rows("PPS + CPE", n + 1, n + n) %>%
+  pack_rows("Soc-Cog", n + n + 1, nrow(all_cor)) %>%
+  kable_classic(full_width = F, font_size = 12, html_font = "Times New Roman") %>%
+  save_kable(file = "Tables/Descriptives/Correlation Matrices Across All Samples.html")
+```
+
+Alt corr mats with cog variables deleted
+
+```{r, eval = FALSE}
+#relevant variables
+tvn_wide_base_relevant <- tvn_wide_base %>%
+    select(SID, study, Sociability:Sociality, contains("composite"))
+
+ipcs_corr <- tvn_wide_base_relevant %>% filter(study == "IPCS") %>% select(-study)
+pp_corr <- tvn_wide_base_relevant %>% filter(study == "PPS_CPE") %>% select(-study)
+cog_corr <- tvn_wide_base_relevant %>% filter(study == "Soc-Cog") %>% select(-study) 
+
+ipcs_corr_mat <- corr_fun(d = ipcs_corr)
+pps_corr_mat <- corr_fun(d = pp_corr)
+cog_corr_mat <- corr_fun(d = cog_corr)
+
+#cut NAs
+#cog_corr_mat <- cog_corr_mat[-c(16:23, 29, 31, 32),]
+
+# Combine the data frames by stacking them vertically
+all_cor <- bind_rows(ipcs_corr_mat, pps_corr_mat, cog_corr_mat) %>%
+  rename(" " = v1) 
+
+
+all_cor <- all_cor%>%
+  mutate(across(where(is.character), ~ if_else(. == "NA", "-", .)))
+
+#number of rows
+n <- 32
+
+#table
+all_cor %>%
+    kable(.
+          , "html"
+          , escape = F
+          , caption = ("<strong>Table 3</strong><br><em>Zero-Order Between-Person Correlations Across All Studies</em>") #and Descriptives
+          , col.names = c("Variable", 1:(ncol(all_cor)-1))#, "M", "SD")
+          , align = c("l", rep("c", ncol(all_cor) - 1))
+    ) %>%
+  pack_rows("IPCS", 1, n) %>%
+  pack_rows("PPS + CPE", n + 1, n + n) %>%
+  pack_rows("Soc-Cog", n + n + 1, nrow(all_cor)) %>%
+  kable_classic(full_width = F, font_size = 12, html_font = "Times New Roman") %>%
+  save_kable(file = "Tables/Descriptives/Correlation Matrices Across All Samples.html")
+```
+
+heatmap
+
+```{r}
+#by study
+corr_nested <- tvn_wide_base_relevant %>%
+  select(-SID) %>%
+  nest(.by = study) %>%
+  mutate(corr_mat = map(data, ~cor(., use = "pairwise")))
+
+#reshape so its long
+r_reshape_fun <- function(r){
+  coln <- colnames(r)
+  r[lower.tri(r, diag = T)] <- NA 
+  r %>% data.frame() %>%
+    rownames_to_column("V1") %>%
+    pivot_longer(
+      cols = -V1
+      , values_to = "r"
+      , names_to = "V2"
+    ) %>%
+    mutate(V1 = factor(V1, coln)
+           , V2 = factor(V2, rev(coln)))
+}
+
+corr_nested <- corr_nested  %>%
+  mutate(corr_mat = map(corr_mat, r_reshape_fun)) 
+corr_nested[1,1] <- "PPS + CPE"
+
+corr_stacked_plots <- corr_nested %>%
+  select(-data) %>%
+  unnest() %>%
+  ggplot(aes(x = V1, y = V2, fill = r))+
+  geom_raster() + 
+  geom_text(aes(label = round(r, 2)), size = 2) + 
+  scale_fill_gradient2(limits = c(-1,1)
+    , breaks = c(-1, -.5, 0, .5, 1)
+    , low = ggpubfigs::friendly_pal("ito_seven")[1], high = ggpubfigs::friendly_pal("ito_seven")[2]
+    , mid = "white", na.value = "white") + 
+  labs(
+    x = NULL
+    , y = NULL
+    , fill = NULL
+    , title = "Zero-Order Correlations"
+    ) + 
+  facet_wrap(~ study, ncol = 1) +
+  theme_classic() + 
+  theme(
+    legend.position = "bottom"
+    , axis.text = element_text(face = "bold")
+    , axis.text.x = element_text(angle = 45, hjust = 1, size = 6.5)
+    , axis.text.y = element_text(size = 5.5)
+    , plot.title = element_text(face = "bold", hjust = .5)
+    , plot.subtitle = element_text(face = "italic", hjust = .5)
+    , panel.background = element_rect(color = "black", size = 1)
+  )
+ggsave(corr_stacked_plots, filename = "Figures/Descriptives/Heat Maps.pdf",
+       width = 10, height = 15)
+
+```
+
+Person level descriptives of momentary variables
+
+```{r, person-level descriptives}
+# first, make tvn_wide long
+tvn_long <- tvn_wide %>%
+  pivot_longer(
+    cols = c(-SID, -study, -Date, -dayno, -beepno, -time_norm)
+    , names_to = c("trait")
+    , values_to = "value"
+  ) 
+
+# function for mean, sd, median, min, max, n, n missing
+descriptive_fun <- function(df, var) {
+  df %>%
+  summarize(
+      mean   = mean({{ var }},   na.rm = TRUE),
+      sd     = sd({{ var }},     na.rm = TRUE),
+      median = median({{ var }}, na.rm = TRUE),
+      min    = min({{ var }},    na.rm = TRUE),
+      max    = max({{ var }},    na.rm = TRUE),
+      n      = n(),
+      .groups = "drop"
+      )
+}
+
+tvn_descriptives <- tvn_long %>%
+  group_by(SID, trait) %>% # we want descriptive for each trait for each participant
+  descriptive_fun(var = value) %>% 
+  ungroup() %>%
+  mutate(mean = round(mean, 2),
+         sd = round(sd, 2))
+
+#warnings are soc-cog homies who dont have DIAMONDS
+```
+
+Individual tables
+
+```{r, eval = FALSE}
+tvn_descriptives_nested <- tvn_descriptives %>% nest(.by = SID)
+
+ind_descriptives_kable_fun <- function(data, SID){
+  kable(data, escape = F, align = c("r", rep("c", 6)),
+        caption = paste0("Participant ", SID, " Variable Descriptives")) %>%
+    kable_classic(full_width = F, html_font = "Times")
+}
+
+tvn_descriptives_ind_tabs <- map2(tvn_descriptives_nested$data, 
+                                 tvn_descriptives_nested$SID, 
+                                 ind_descriptives_kable_fun)
+
+for(i in 1:length(tvn_descriptives_ind_tabs)){
+   save_kable(tvn_descriptives_ind_tabs[[i]],
+          file = paste0("Tables/Individual Descriptives/Participant ", tvn_descriptives_nested$SID[i], " Descriptives.html"))
+}
+
+```
+
+Within-Person Correlations of all Variables
+
+```{r, warning = FALSE}
+# function creating matrix including variable names as a column
+cor_fun <- function(x) {
+  r <- cor(x, use = "pairwise")
+  r <- round(r, 2)
+  r %>% 
+    data.frame() %>%
+    rownames_to_column("var") %>%
+    as_tibble()
+}
+
+# add col of correlation matrices
+# sd is zero error message: no sd in the situation variables shown in the code chunk above
+tvn_nested_r <- tvn_data %>%
+  mutate(r = map(data, function(x) cor_fun(x %>%
+                                             select(Sociability:Sociality)))) %>%
+  arrange(SID) #warnings due to 0 variance situation variables
+
+# unnested -> matrix of stacked 153 25x25 cov matrices
+tvn_cor <- tvn_nested_r %>%
+  select(-data) %>%
+  unnest(r) %>% 
+  arrange((SID))
+
+#warnings are for DIAMONDS
+```
+
+Table corr matrices
+
+```{r}
+kable(tvn_cor, escape = F, align = c("r", rep("c", 23), "l"),
+        caption = "<strong>Table S2</strong><br><em>Correlation Matrices of All Indicators</em>") %>%
+    kable_classic(full_width = F, html_font = "Times") %>%
+  save_kable(file = "Tables/Descriptives/Corr Matrices Within-Person.html")
+
+```
+
+## Parallel Analysis
+
+```{r, warning = FALSE}
+plan(multisession, workers = availableCores() - 1)
+
+r_fun <- function(d){
+  r <- cor(d, use = "pairwise")
+  return(r)
+}
+
+par_fun <- function(r, n){
+  fa.parallel(
+    r
+    , fm = 'ml'
+    , n.obs = n
+    , fa = 'fa'
+    , n.iter = 1000
+    # , SMC = T
+    , quant = .95
+    )
+}
+
+fa_fun <- function(r, n, nfac){
+    fa <- fa(
+      r
+      , n.obs = n
+      , nfactors = nfac
+      , rotate = "oblimin"
+      )
+  return(fa)
+}
+
+fa5_fun <- function(r, n){
+   fa <- fa(
+      r
+      , n.obs = n
+      # , nfactors = nfac
+      , nfactors = 5
+      , rotate = "oblimin"
+      # , SMC = T
+      )
+   return(fa)
+}
+tvn_nested_pers <- tvn_wide %>%
+  select(SID, Sociability:CrtvImagination) %>%
+  nest(.by = SID)
+
+tvn_fa <- tvn_nested_pers %>%
+  mutate(r = future_map(data, r_fun)
+         , n = future_map_dbl(data, nrow)
+         , par = future_map2(r, n, par_fun)
+         , nfact = future_map_dbl(par, ~(.)$nfact)
+         , fa = future_pmap(list(r, n, nfact), safely(fa_fun))
+         , fa5 = future_map2(r, n, fa5_fun))
+
+save(tvn_fa, file = "Data/tvn_fa.RData")
+```
+
+Remove NAs
+
+```{r}
+tvn_parallel <- tvn_fa %>%
+  select(SID, nfact, fa)
+
+#remove nulls like a loser
+tvn_parallel_complete <- tvn_parallel %>%
+  filter(nfact != 0)
+
+table(tvn_parallel_complete$nfact)
+```
+
+Histogram of nfact
+
+```{r}
+pfa_plot <- ggplot(data = tvn_parallel_complete, aes(x = nfact)) +
+  geom_histogram(binwidth = 0.5) +
+  xlab("Number of Factors") + 
+  ylab("Number of Participants") +
+  scale_x_continuous(breaks = 1:10) + 
+  ggtitle("Parallel Analysis of Trait State Indicators")
+
+
+ggsave(pfa_plot, file = "Figures/Descriptives/Parallel Analysis Number of Factors.pdf")
+```
+
+Table NOT DONE; dont think i need this its not focal
+
+```{r, eval = FALSE}
+# future_map(tvn_parallel_complete$fa$result, 
+#            function(x) kable(x, escape = F,
+#                              caption = paste0(c("Participant ", x$SID, " Parallel Analysis Fits")) %>%
+#              kable_classic(full_width = F, html_font = "Times") %>%
+#              save_kable(file = "z.Tables/Descriptives/PA Fits.html"))
+#            )
+# 
+# #how tf do i table this
+# x <- tvn_parallel_complete$fa[[1]]$result
+```
+
+Omega
+
+```{r, output= FALSE}
+# function creating square cor matrix (no col of v names)
+cor_square_fun <- function(x) {
+  r <- cor(x, use = "pairwise")
+  r %>% 
+    data.frame() %>%
+    # rownames_to_column("var") %>%
+    as_tibble()
+}
+
+# create nested df of only p state v's
+tvn_nested_personality <- tvn_wide %>%
+  select(SID, Sociability:CrtvImagination) %>%
+  group_by(SID) %>%
+  nest() %>%
+  ungroup()
+
+# add col of correlation matrices
+tvn_nested_personality <- tvn_nested_personality %>%
+  mutate(r_square = map(data, cor_square_fun)) %>%
+  arrange(SID)
+
+tvn_cor_square <- tvn_nested_personality %>%
+  select(-data) %>%
+  unnest(r_square) %>% 
+  arrange(desc(SID))
+
+tvn_omega <- tvn_nested_personality %>%
+  group_by(SID) %>%
+  mutate(omega = map(r_square, omega)) %>%
+  ungroup() %>%
+  select(omega)
+save(tvn_omega, file ="Data/tvn_omega.RData")
+
+omega_h_values <- vector()
+for(i in 1:nrow(tvn_omega)){
+  omega_h_values[i] <- tvn_omega[[1]][[i]][["omega_h"]]
+}
+
+hist(omega_h_values)
+
+range(omega_h_values)
+```
+
+Person Means EFA DF
+
+```{r}
+# facet person means across time 
+tvn_wide_means <- tvn_wide %>%
+  group_by(SID) %>%
+  summarise(
+    Sociability_Mean = mean(Sociability),
+    EnergyLevel_Mean = mean(EnergyLevel),  
+    Assertive_Mean = mean(Assertive),  
+    Trust_Mean = mean(Trust),
+    Respect_Mean = mean(Respect),
+    Compassion_Mean = mean(Compassion),
+    Productivity_Mean = mean(Productivity),
+    Responsibility_Mean = mean(Responsibility),
+    Organization_Mean = mean(Organization),
+    Depression_Mean = mean(Depression),
+    Anxiety_Mean = mean(Anxiety),
+    EmotionalVol_Mean = mean(EmotionalVol),
+    IntCuriosity_Mean = mean(IntCuriosity),
+    AesthSense_Mean = mean(AesthSense),
+    CrtvImagination_Mean = mean(CrtvImagination) 
+  ) %>%
+  ungroup()
+```
+
+Person Means EFA
+
+```{r}
+person_means_efa <- tvn_wide_means %>%
+  select(-SID) %>%
+  efa(nfactors = 1:7,
+      rotation = "geomin") #oblique
+```
+
+EFA Summary
+
+```{r}
+# 1:7 factors
+person_means_efa_fit <- summary(person_means_efa, standardized = TRUE)[["fit.table"]]
+as.data.frame(person_means_efa_fit)
+
+#Table efa fit
+kable(as.data.frame(person_means_efa_fit), escape = F,
+        caption = "<strong>EFA Fits</strong>") %>%
+    kable_classic(full_width = F, html_font = "Times") %>%
+  save_kable(file = "Tables/Descriptives/EFA Fits.html")
+
+
+# 5 factors
+summary(person_means_efa[["nf5"]], standardized = TRUE)
+
+save(person_means_efa_fit, file = "Data/person_means_efa_fit.RData")
+```
+
+FFM CFA
+
+```{r}
+ffm <- ('e =~ Sociability_Mean + EnergyLevel_Mean + Assertive_Mean
+a =~ Trust_Mean + Respect_Mean + Compassion_Mean
+c =~ Productivity_Mean + Responsibility_Mean + Organization_Mean
+n =~ Depression_Mean + Anxiety_Mean + EmotionalVol_Mean
+o =~ IntCuriosity_Mean + AesthSense_Mean + CrtvImagination_Mean')
+
+ffm_cfa <- cfa(model = ffm, 
+               data = tvn_wide_means)
+
+summary(ffm_cfa, fit.measures = TRUE)
+
+semoutput::sem_tables(ffm_cfa, standardized = TRUE)
+```
+
+Time Series Plots
+
+```{r, warning = FALSE}
+load(sprintf("%s/Data/tvn_list.RData", wd)) #list for ts plots
+
+#function to transform df
+ts_transform_fun <- function(x){
+  x %>%
+    select(SID, Date, Sociability:CrtvImagination) %>%
+    group_by(Date) %>%
+    mutate(E = mean(Sociability:Assertive),
+           A = mean(Trust:Compassion),
+           C = mean(Productivity:Organization),
+           N = mean(Depression:EmotionalVol),
+           O = mean(IntCuriosity:CrtvImagination)) %>%
+    select(SID, Date, E:O) %>%
+    ungroup() %>%
+    pivot_longer(cols = -c(SID, Date), names_to = "Trait", values_to = "value") %>%
+    mutate(Trait = factor(Trait, levels = c("E", "A", "C", "N", "O")))
+}
+
+tvn_plots <- map(tvn_list, ts_transform_fun)
+
+#default plotting settings
+theme_set(theme_bw(base_size = 14) )
+theme_update(legend.position="bottom", 
+             panel.spacing=grid::unit(0,"lines"),
+             strip.background=element_rect(color="black",fill="white"),
+             panel.grid=element_blank())
+
+#function 
+ts_plot_fnc <- function(data){
+  ggplot(data=data, aes(x=Date, y=value, group = Trait, colour = Trait)) +
+  geom_line(linewidth = 1) +
+  scale_colour_brewer(palette = "Set1") +
+  labs(y = "POMP") +
+  ggtitle(paste0("SID ", unique(data$SID))) +
+  ylim(0,100) +
+  theme(legend.text = element_text(size=15),
+        legend.title = element_text(size=15),
+        axis.title.y = element_text(size = 20),
+        axis.text.x = element_text(size = 20),
+        axis.title.x=element_blank())
+}
+
+ts_plots <- map(tvn_plots, ts_plot_fnc)
+
+for(i in 1:length(ts_plots)){
+   ggsave(ts_plots[[i]],
+          filename = paste0("Figures/Trait Time Series/Participant ", names(ts_plots)[[i]], " Time Series Plot.pdf")
+   )
+}
+```

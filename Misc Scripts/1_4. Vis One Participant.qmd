@@ -1,0 +1,129 @@
+---
+title: "1_4. Vis One Participant"
+format: html
+editor: visual
+---
+
+```{r, echo = FALSE}
+library(qgraph)
+library(mgm) 
+library(tidyverse)
+wd <- getwd()
+set.seed(420)
+```
+
+```{r}
+load(sprintf("%s/Data/p221.RData", wd)) 
+load(sprintf("%s/Data/p221_tvvar_ten.RData", wd)) 
+load(sprintf("%s/Data/p221_resample_ten.RData", wd))
+load(sprintf("%s/Data/p221_pred_ten.RData", wd)) 
+```
+
+```{r}
+# ----- Preprocessing  ------
+# Compute mean model over time to create decent layout
+#15 x 15 matrix of mean edge weights across the time series
+mean_wadj <- apply(p221_tvvar_ten$wadj[, , 1, ], 1:2, mean)
+
+#negative signs are stored separately so apply them to the relevant parameter estimates
+par_ests <- p221_tvvar_ten$wadj
+ind_negative <- which(p221_tvvar_ten$signs == -1, arr.ind = T)
+par_ests[ind_negative] <- par_ests[ind_negative] * -1
+par_ests[p221_tvvar_ten$edgecolor=="red"] <- par_ests[p221_tvvar_ten$edgecolor=="red"] * -1
+```
+
+SD of parameters Used in line plots
+
+```{r}
+parm_sds <- apply(par_ests, 1:2, sd) #15x15 matrix of sds
+parm_sds_mat <- matrix(NA, 15^2, 3) #15 variables; 3 cols = variable on variable and estimate
+counter <- 1
+for(i in 1:15) {
+  for(j in 1:15) {
+    parm_sds_mat[counter, ] <- c(i, j, parm_sds[i, j]) 
+    counter <- counter + 1
+  }
+}
+
+#parameters with highest SDs
+parm_sds_mat_ord <- parm_sds_mat[order(parm_sds_mat[, 3], decreasing = TRUE), ]
+head(parm_sds_mat_ord) # six highest SDs
+
+```
+
+# ----- Plotting ------
+
+```{r}
+# layout of the network
+Q <- qgraph(t(mean_wadj), layout="spring", DoNotPlot=T, repulsion=.5)
+
+# Plot graph at selected fixed time points
+#tpSelect <- c(1, 4, 7, 10) #ill likely use these for presentations but i wanna see all networks for p221
+tpSelect <- 1:10
+
+
+#color nodes by trait
+traitgroups <- list("Extraversion" = c(1:3), #columns in df
+                    "Agreeableness" = c(4:6),
+                    "Conscientiousness" = c(7:9),
+                    "Neuroticism" = c(10:12),
+                    "Openness" = c(13:15)
+                    )
+
+#default plotting settings
+theme_set(theme_bw(base_size = 14, base_family="Times") )
+theme_update(legend.position="bottom", 
+             panel.spacing=grid::unit(0,"lines"),
+             strip.background=element_rect(color="black",fill="white"),
+             panel.grid=element_blank())
+```
+
+```{r}
+tvn_plots_221 <- list()
+
+for(tp in tpSelect) {
+  tvn_plots_221[[tp]] <- qgraph(t(par_ests[, , 1, tp]), #parameter estimates to graph
+         layout = Q$layout, #using mean; "spring" has overlapping nodes
+         groups = traitgroups, #group traits by color
+         palette = 'colorblind',
+         width = 15 * 1.7, # width of figure
+         height = 15, # height of figure,
+         border.width = 0.5,
+         label.cex = 0.7, # scalar on label size
+         label.color = 'black', # string on label colors
+         label.prop = 0.9, 
+         negDashed = T, #this aint workin
+         loop = 0.7,
+         edge.color = t(p221_tvvar_ten$edgecolor[, , 1, tp]), 
+         labels = c("Sociability", "Energy Level", colnames(p221[,5:13]), "Emo Volatility",
+                    "Int Curiosity", "Aesth Sense", "Crtv Imagery"), #variable names
+         minimum = 0, #min value for edge to be shown
+         maximum = .5, #max to scale edge weights
+         title.cex=1, #title size
+         border.color = "grey60", edge.color = "grey60", 
+         trans=1,fade=F,
+         vTrans = 190, # transparency of the nodes to better determine edges crossing node areas
+         details = F, shape = "ellipse", node.width=1, node.height=.6, # node appearance
+         vsize = 13, #node size 
+         asize = 4, #arrow head size
+         edge.width=.6,
+         label.font=15, 
+         label.scale=F,
+         pie = p221_pred_ten$tverrors[[tp]][, 3], #R^2
+         title=paste(paste0("Participant ", unique(as.character(p221$SID)), " TVN",
+                            " Estimation Point ", as.character(tp))),
+         layoutOffset=c(0,0), 
+         GLratio=3.5, 
+         layoutScale=c(.8, .8))
+}
+
+```
+
+```{r}
+tvn_plots_221 <- compact(tvn_plots_221) #compact for when there is only 4 estimation points plotted; in this 10 network case there are no nulls
+pdf("p221 networks.pdf")
+for (i in 1:length(tvn_plots_221)){
+  plot(tvn_plots_221[[i]])
+}
+dev.off()
+```

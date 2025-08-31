@@ -1,0 +1,286 @@
+---
+title: "0_1. Data Preparation IPCS"
+author: "Colin J Lee"
+format: 
+  html:
+    code-tools: true
+    code-copy: true
+    code-line-numbers: true
+    code-link: true
+    theme: united
+    highlight-style: tango
+    df-print: paged
+    code-fold: show
+    toc: true
+    toc-float: true
+    self-contained: true
+---
+
+```{r, include=FALSE}
+library(lubridate)
+library(Amelia)
+library(plyr)
+library(psych)
+library(lavaan)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+```{r, codebook and data, include = FALSE}
+ipcs_codebook <- sprintf("%s/Codebooks/ipcs_codebook.xlsx", wd) %>%
+  readxl::read_xlsx(., sheet = "IPCS")
+
+# State Data  
+load(sprintf("%s/Raw Data/ipcs_state_data.RData", wd))
+
+#fix hourblock1 name
+ipcs_states <- ipcs_states %>%
+  rename(HourBlock1 = 'Hour Block 1')
+
+#initial ids for demographics
+ipcs_ids_pre <- unique(ipcs_states$SID) %>% as.numeric
+
+save(ipcs_ids_pre, file = "Data/ipcs_ids_pre.RData")
+```
+
+Fix stuff
+p212 dates messed up. 1/19 and 12/19 make the time series discontinuous. need to change 12/19 to 12/18
+```{r}
+# ID as numeric
+ipcs_states$SID <- as.numeric(ipcs_states$SID)
+
+# Date as POSIXct
+ipcs_states$Date <- ymd_hm(ipcs_states$Date) 
+
+ipcs_states <- ipcs_states %>% 
+  arrange(SID, Date)
+
+#fix 212
+year(ipcs_states[8124:8169,]$Date) <- 2018
+
+```
+
+```{r, clean and min assessments}
+### how many participants initially in dataset?
+ipcs_states %>%
+  group_by(SID) %>%
+  distinct(SID) %>%
+  nrow() #199
+
+# Merge E_Cpmn and A_Cmpn cols (due to typo) and remove E_Cmpn
+ipcs_states$A_Cmpn <- coalesce(ipcs_states$A_Cmpn, ipcs_states$E_Cmpn)
+ipcs_states <- ipcs_states[,-21]
+
+
+# Min 50
+ipcs_states <- ipcs_states %>%
+  group_by(SID) %>%
+  filter(n() >= 50) %>% #199 participants to 70
+  arrange(SID, Date) %>%
+  mutate(all_beeps = seq(1, n(), 1)) %>%
+  ungroup()
+
+length(unique(ipcs_states$SID)) #70
+
+
+```
+
+```{r, multiple imputation}
+ipcs_states_mi <- data.frame(unclass(ipcs_states %>% 
+                                       select(-Date, -Hour, -Minute, -HourBlock1, -HourBlock)))
+
+ipcs_states_mi <- amelia(ipcs_states_mi, m = 1, ts = "all_beeps", cs = "SID")$imputations[[1]] %>%
+  as_tibble() %>%
+  full_join(ipcs_states%>% select(SID, Date, Hour, HourBlock, HourBlock1, all_beeps)) %>%
+  select(-all_beeps); ipcs_states_mi
+
+# check ranges after imputation
+ipcs_states_range <- data.frame(sapply(ipcs_states_mi, function(x) range(x, na.rm = TRUE)))
+ipcs_states_range <- data.frame(t(ipcs_states_range)) #outside 1 and 5
+ipcs_states_range
+
+# look at state values post MI
+ipcs_pers <- ipcs_states_mi[,2:16]
+describe(ipcs_pers) # min and max values outside of 1-5 range
+
+# restrict range of state values after MI
+ipcs_pers[ ipcs_pers > 5 ] <- 5
+ipcs_pers[ ipcs_pers < 1] <- 1
+
+### Same for situation
+ipcs_sit <- ipcs_states_mi[,17:24]
+ipcs_sit[ ipcs_sit > 3 ] <- 3
+ipcs_sit[ ipcs_sit < 1 ] <- 1
+
+#recombine
+ipcs_states_mi <- cbind(ipcs_states_mi$SID, ipcs_states_mi$Date, ipcs_states_mi$Hour, ipcs_states_mi$HourBlock1, ipcs_pers, ipcs_sit)
+colnames(ipcs_states_mi)[1] <- "SID"
+colnames(ipcs_states_mi)[2] <- "Date"
+colnames(ipcs_states_mi)[3] <- "Hour"
+colnames(ipcs_states_mi)[4] <- "HourBlock1"
+
+
+describe(ipcs_states_mi)
+```
+
+```{r, join codebook and arrange columns}
+ipcs_states_long <- ipcs_states_mi %>%
+  pivot_longer(names_to = c("name", "item")
+               , names_sep = "_"
+               , values_to = "value"
+               , cols = c(-SID, -Date, -Hour, -HourBlock1)
+               , values_drop_na = T) %>%
+  left_join(ipcs_codebook %>% filter(level == "state") %>% select(category, name, item) %>% distinct())
+
+# now that codebook is joined, make it wide
+ipcs_wide <- ipcs_states_long %>%
+  filter(category == "pers") %>%
+  distinct() %>%
+  pivot_wider(
+    names_from = c("category", "name", "item")
+    , names_sep = "_"
+    , values_from = "value"
+  ) %>%
+  full_join(
+    ipcs_states_long %>%
+      distinct() %>%
+      filter(category == "sit") %>%
+      select(-item) %>%
+      pivot_wider(
+        names_from = c("category", "name")
+        , names_sep = "_"
+        , values_from = "value"
+      )
+  ) 
+
+# order personality variables EACNO
+ipcs_wide_order <- ipcs_wide %>%
+  select("pers_E_Scblty", "pers_E_EnerLev", "pers_E_Assert", "pers_A_Trust", "pers_A_Rspct", "pers_A_Cmpn", "pers_C_Prdctv", "pers_C_Rspnbl", "pers_C_Org", "pers_N_Depr", "pers_N_Anxty", "pers_N_EmoVol", "pers_O_IntCur", "pers_O_AesSens", "pers_O_CrtvImag")
+colnames(ipcs_wide)
+
+#order situation variables DIAMONDS
+ipcs_wide_sit_order <- ipcs_wide %>%
+  select(sit_Duty, sit_Intellect, sit_Adversity, sit_Mating, sit_pOsitivity, sit_Negativity, sit_Deception, sit_Sociability)
+
+ipcs_wide <- cbind(ipcs_wide$SID, ipcs_wide$Date, ipcs_wide$Hour, ipcs_wide$HourBlock1, 
+                   ipcs_wide_order, ipcs_wide_sit_order)
+
+colnames(ipcs_wide) <- c("SID", "Date", "Hour", "HourBlock1", "Sociability", "EnergyLevel", "Assertive", "Trust", "Respect", "Compassion", "Productivity", "Responsibility", "Organization", "Depression", "Anxiety", "EmotionalVol", "IntCuriosity", "AesthSense", "CrtvImagination", "Duty", "Intellect","Adversity", "Mating", "pOsitivity", "Negativity", "Deception", "Sociality")
+```
+
+```{r, POMP}
+pomp <- function(x, na) (x - min(x, na.rm = na))/(max(x, na.rm = na) - min(x, na.rm = na))*100
+
+ipcs_wide <- ipcs_wide %>%
+  mutate(
+    Sociability = pomp(Sociability, TRUE)
+    , EnergyLevel =  pomp(EnergyLevel, TRUE)
+    , Assertive =  pomp(Assertive, TRUE)
+    , Trust =  pomp(Trust, TRUE)
+    , Respect =  pomp(Respect, TRUE)
+    , Compassion =  pomp(Compassion, TRUE)
+    , Productivity =  pomp(Productivity, TRUE)
+    , Responsibility =  pomp(Responsibility, TRUE)
+    , Organization =  pomp(Organization, TRUE)
+    , Depression =  pomp(Depression, TRUE)
+    , Anxiety =  pomp(Anxiety, TRUE)
+    , EmotionalVol =  pomp(EmotionalVol, TRUE)
+    , IntCuriosity =  pomp(IntCuriosity, TRUE)
+    , AesthSense =  pomp(AesthSense, TRUE)
+    , CrtvImagination =  pomp(CrtvImagination, TRUE)
+  )
+
+#describe(ipcs_wide) #cool
+```
+
+```{r, check}
+# No NAs/NANs/Infs
+sum(is.na(ipcs_wide)) #0
+sum(apply(ipcs_wide,2,is.nan)) #0
+sum(apply(ipcs_wide,2,is.infinite)) #0
+sum(ipcs_wide < 0) #0
+```
+LOOK AT VARIABLE VARIANCES
+
+Descriptives
+
+```{r}
+#make it long
+ipcs_long <- ipcs_wide %>%
+  select(SID, Sociability:CrtvImagination) %>%
+  pivot_longer(
+    cols = Sociability:CrtvImagination
+    , names_to = c("trait")
+    , values_to = "value"
+  ) 
+
+# function for mean, sd, median, min, max, n, n missing
+descriptive_fun <- function(df, var) {
+  df %>%
+  summarize(
+      mean = mean({{ var }},   na.rm = TRUE),
+      sd     = sd({{ var }},     na.rm = TRUE),
+      median = median({{ var }}, na.rm = TRUE),
+      min    = min({{ var }},    na.rm = TRUE),
+      max    = max({{ var }},    na.rm = TRUE),
+      # omega  = omega({{var}}),
+      # alpha  = alpha({{var}}),
+      n      = n(),
+      .groups = "drop"
+      )
+}
+
+ipcs_descriptives <- ipcs_long %>%
+  group_by(SID, trait) %>% # we want descriptive for each trait for each participant
+  descriptive_fun(var = value) %>% 
+  ungroup()
+
+```
+
+Look at low variance participant-variables
+
+```{r}
+ipcs_descriptives %>%
+  filter(sd < 10) 
+#doesn't seem like any have super super low variance (except p171 dep)? unless 5 is low
+#oh, but most are zero inflated or 100 inflated 
+```
+
+Look at median = 0 or 100
+
+```{r}
+ipcs_descriptives %>%
+  filter(median == 0 | median == 100)
+# alot of median = 0, but substantial variance for those p-variable combos
+```
+Add study variable
+```{r}
+ipcs_wide <- ipcs_wide %>%
+  mutate(study = "IPCS") %>%
+  filter(SID != 171)
+
+table(is.na(ipcs_wide))
+```
+
+
+Stuff I need
+```{r}
+#p221 for script 0
+p221 <- ipcs_wide %>%
+  filter(SID ==221)
+
+
+#post ids for demographics
+ipcs_ids_post <- unique(ipcs_wide$SID)
+
+save(ipcs_ids_post, file = "Data/ipcs_ids_post.RData")
+```
+
+```{r, save}
+save(p221, file = "Data/p221.RData") #this was used to test fitting TVN models (found in Misc Scripts folder)
+save(ipcs_wide, file = "Data/ipcs_wide.RData")
+```

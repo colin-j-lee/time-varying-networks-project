@@ -1,0 +1,445 @@
+---
+title: "7. Network Comparisons"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(psych)
+library(lavaan)
+library(furrr)
+library(kableExtra)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+# load(sprintf("%s/Data/tvn_tvvar.RData", wd))
+# load(sprintf("%s/Data/tvn_contemp.RData", wd))
+# 
+# #keep less than 1.5
+# tvn_tvvar <- tvn_tvvar %>%
+#   filter(bandwidth < 1.5)
+# tvn_contemp <- tvn_contemp %>%
+#   filter(bandwidth < 1.5)
+
+#this script frobs
+load(sprintf("%s/Data/tvn_frob.RData", wd))
+load(sprintf("%s/Data/contemp_frob.RData", wd))
+```
+
+Extract 5 weighted adjacency matrices for each participant, compute pairwise Frobenius norms between each matrix, store in a column as a dataframe, and compute the mean Frob norm for each participant
+
+```{r}
+#First, combine weights and signs from mgm object
+combine_signs_and_weights <- function(tvvar_entry) {
+  # Extract the weighted adjacency matrix (wadj) and the signs (signs)
+  wadj <- tvvar_entry[["wadj"]][,,,]  # Shape: (15x15x1x5)
+  signs <- tvvar_entry[["signs"]][,,,]  # Same shape: (15x15x1x5)
+  
+  # Combine signs and weights by multiplying them element-wise
+  full_wadj <- wadj * signs  # (15x15x5)
+  
+  #turn NAs into 0s
+  full_wadj <- ifelse(is.na(full_wadj), 0, full_wadj)
+  
+  # Return the combined weighted adjacency matrices
+  return(full_wadj)
+}
+
+# Function to compute Frobenius norm comparisons for one participant
+frobenius_comparisons <- function(tvvar_entry) {
+  # Combine signs and weights to get the full weighted adjacency matrix
+  matrices <- combine_signs_and_weights(tvvar_entry)
+  
+  # Get all pairwise combinations of the 5 matrices
+  comparisons <- combn(1:5, 2, simplify = FALSE)
+  
+  # Compute Frobenius norm for each pair
+  frobenius_results <- map_dfr(comparisons, function(pair) {
+    tibble(
+      matrix1 = pair[1],
+      matrix2 = pair[2],
+      frobenius_norm = norm(matrices[,,pair[1]] - matrices[,,pair[2]], type = "F")
+    )
+  })
+  
+  return(frobenius_results)
+}
+
+# Apply function across all participants and store results in a new column
+tvn_frob <- tvn_tvvar %>%
+  mutate(
+    frobenius_comparisons = map(tvvar, frobenius_comparisons),  # Compute Frobenius norms across studies
+    mean_frobenius_norm = map_dbl(frobenius_comparisons, ~ mean(.x$frobenius_norm))
+  ) %>%
+  group_by(study) %>%
+  mutate(cor_lag = cor(mean_frobenius_norm, obs, use = "pairwise.complete.obs")) %>% # correlations within study
+  select(SID, study, bandwidth, frobenius_comparisons, mean_frobenius_norm, cor_lag)
+
+save(tvn_frob, file = "Data/tvn_frob.RData")
+
+cor(tvn_frob$bandwidth, tvn_frob$mean_frobenius_norm, use = "pairwise.complete.obs")
+```
+
+Same for contemporaneous tv nets
+
+```{r}
+#First, combine weights and signs from mgm object
+combine_signs_and_weights_contemp <- function(tvvar_entry) {
+  # Extract the weighted adjacency matrix (wadj) and the signs (signs)
+  wadj <- tvvar_entry[["pairwise"]][["wadj"]][,,]  # Shape: (15x15x1x5)
+  signs <- tvvar_entry[["pairwise"]][["signs"]][,,]  # Same shape: (15x15x1x5)
+  
+  # Combine signs and weights by multiplying them element-wise
+  full_wadj <- wadj * signs  # (15x15x5)
+  
+  #turn NAs into 0s
+  full_wadj <- ifelse(is.na(full_wadj), 0, full_wadj)
+  
+  # Return the combined weighted adjacency matrices
+  return(full_wadj)
+}
+
+# Function to compute Frobenius norm comparisons for one participant
+frobenius_comparisons_contemp <- function(tvvar_entry) {
+  # Combine signs and weights to get the full weighted adjacency matrix
+  matrices <- combine_signs_and_weights_contemp(tvvar_entry)
+  
+  # Get all pairwise combinations of the 5 matrices
+  comparisons <- combn(1:5, 2, simplify = FALSE)
+  
+  # Compute Frobenius norm for each pair
+  frobenius_results <- map_dfr(comparisons, function(pair) {
+    tibble(
+      matrix1 = pair[1],
+      matrix2 = pair[2],
+      frobenius_norm = norm(matrices[,,pair[1]] - matrices[,,pair[2]], type = "F")
+    )
+  })
+  
+  return(frobenius_results)
+}
+
+# Apply function across all participants and store results in a new column
+contemp_frob <- tvn_contemp %>%
+  mutate(
+    frobenius_comparisons = map(tvmgm, frobenius_comparisons_contemp),  # Compute Frobenius norms
+    mean_frobenius_norm = map_dbl(frobenius_comparisons, ~ mean(.x$frobenius_norm))
+  ) %>%
+  group_by(study) %>%
+  mutate(cor_con = cor(mean_frobenius_norm, obs, use = "pairwise.complete.obs")) %>% # correlations within study
+  select(SID, study, bandwidth, frobenius_comparisons, mean_frobenius_norm, cor_con)
+
+save(contemp_frob, file = "Data/contemp_frob.RData")
+
+#corr between frob and bw
+cor(contemp_frob$bandwidth, contemp_frob$mean_frobenius_norm, use = "pairwise.complete.obs")
+```
+
+DF
+
+```{r}
+#combine lagged and contemp
+frob_plot_df <- tvn_frob %>%
+  arrange(study) %>%
+  mutate(study = ifelse(study =="PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         study = factor(study, levels = c("IPCS", "PPS + CPE", "Soc-Cog"))
+         ) %>%
+  rename(lag_frob = mean_frobenius_norm) %>%
+  select(SID, lag_frob, study, cor_lag) %>%
+  full_join(
+    contemp_frob %>%
+      arrange(study) %>%
+      na.omit () %>%
+      mutate(study = ifelse(study =="PPS_CPE", "PPS + CPE", study),
+             study = ifelse(study == "Cog", "Soc-Cog", study),
+             study = factor(study, levels = c("IPCS", "PPS + CPE", "Soc-Cog"))) %>%
+      rename(con_frob = mean_frobenius_norm) %>%
+      select(SID, con_frob, study, cor_con)
+  )
+    
+#keep the sample medians separate for plotting vertical lines
+frob_medians <- tvn_frob %>%
+  arrange(study) %>%
+  na.omit () %>%
+  mutate(study = ifelse(study =="PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         study = factor(study, levels = c("IPCS", "PPS + CPE", "Soc-Cog"))) %>%
+  group_by(study) %>%
+  summarize(median_lag_frob = median(mean_frobenius_norm)) %>%
+  ungroup() %>%
+  left_join(
+  contemp_frob %>%
+  arrange(study) %>%
+  na.omit () %>%
+  mutate(study = ifelse(study =="PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         study = factor(study, levels = c("IPCS", "PPS + CPE", "Soc-Cog"))) %>%
+  group_by(study) %>%
+  summarize(median_con_frob = median(mean_frobenius_norm)) %>%
+  ungroup()
+  )
+
+frob_medians_long <- frob_medians %>%
+  pivot_longer(cols = c(median_lag_frob, median_con_frob), 
+               names_to = "frob_type", 
+               values_to = "median_frob")
+```
+
+Plot
+
+```{r}
+ito_colors <- ggpubfigs::friendly_pal("ito_seven")
+
+frob_plot <- ggplot(frob_plot_df, aes(x = lag_frob)) +
+  geom_density(aes(fill = "Lagged"), alpha = 0.5, adjust = 0.5) +  
+  geom_density(aes(x = con_frob, fill = "Contemporaneous"), alpha = 0.5, adjust = 0.5) + 
+  geom_vline(data = frob_medians_long, 
+             aes(xintercept = median_frob, color = frob_type), 
+             linewidth = 1, linetype = "dashed", show.legend = FALSE) + 
+  coord_cartesian(xlim = c(0, 4.5), expand = FALSE)+
+  scale_y_continuous(
+    limits = c(0,1.1),
+    labels = function(x) ifelse(x == 0, "", x)
+) +
+  geom_text(
+    data = subset(frob_plot_df, SID == 2),  # had to do sid cause study just repeats and makes it ugly
+    aes(x = 2, y =.9, label = "Higher Similarity",
+        fontface = "bold.italic"), size = 6) +
+  geom_segment(
+    data = subset(frob_plot_df, SID == 2), 
+               aes(x = 2.25, xend = 1.75, y = .75, yend = .75),
+               arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+               size = 0.75) +
+  facet_wrap(~study, ncol = 1, strip.position = "right") + 
+  scale_fill_manual(name = "", values = c("Lagged" = ito_colors[2], "Contemporaneous" = ito_colors[1])) +  
+  scale_color_manual(values = c("median_lag_frob" = ito_colors[2], "median_con_frob" = ito_colors[1])) +
+  theme_minimal() +
+  labs(title = "Density Distributions of Person-Mean Frobenius Norms \n For Participants With Bandiwdths < 1.5",
+       x = "Average Within-Person Frobenius Norm", 
+       y = "Density",
+       fill = "Variable",
+       color = "Median Type") +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = .5, face = "bold", size = 20),
+        axis.title.x = element_text(size=14, color = "black"),
+        axis.title.y = element_text(size=14, color = "black"),
+        axis.text.y = element_text(size = 10),
+        strip.text = element_text(face = "bold", size= 12),
+        plot.margin = margin(10, 30, 40, 10),
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+        legend.text = element_text(size = 14)  # Adjust size as needed
+
+)
+
+ggsave(
+  "Manuscript Tables and Figures/Frob Dist Figure.png", 
+  plot = frob_plot, 
+  width = 12, height = 7, 
+  dpi = 1000, 
+  bg = "white"
+)
+#the warning is the NAs
+```
+
+Study-level descriptives
+
+```{r}
+frob_tab_df <- frob_plot_df %>% group_by(study) %>%
+  summarize(prop_lag = "-",
+            lag_median = median(lag_frob, na.rm = TRUE),
+            lag_iqr = IQR(lag_frob, na.rm = TRUE),
+            cor_lag = unique(cor_lag),
+            prop_con = "-",
+            con_median = median(con_frob, na.rm = TRUE),
+            con_iqr = IQR(con_frob, na.rm = TRUE),
+            cor_con = unique(cor_con),
+) %>%
+  mutate_if(is.numeric, function(x) round(x, 2)) %>%
+  mutate(
+    lag_med_iqr = sprintf("%.2f (%.2f)", lag_median, lag_iqr),
+    con_med_iqr = sprintf("%.2f (%.2f)", con_median, con_iqr),
+  ) %>%
+  select(study, prop_con, con_med_iqr, cor_con, prop_lag, lag_med_iqr, cor_lag) %>%
+  mutate_all(as.character)
+frob_tab_df[3,4] <- "-0.1"
+frob_tab_df <- frob_tab_df%>% drop_na() #redundancies 
+
+save(frob_tab_df, file = "Data/frob_tab_df.RData")
+
+#nvm im combing with bandwidth
+
+# #table
+# kable(
+#   frob_tab_df,
+#   escape = F,
+#   "html",
+#   caption = "<strong>Table 5</strong><br><em>Frobenius Norm Means and Standard Deviations by Study</em>",
+#   col.names = c(
+#     "Study",
+#     "Lagged Mean (SD)", 
+#     "Contemp. Mean (SD)") 
+#   ,
+#   align = c("l",rep("c", 2))
+# ) %>%
+#   # # 4. Add the top headers for the three studies
+#   # add_header_above(c(
+#   #   " " = 1,
+#   #   "Lagged" = 3,
+#   #   "Contemporaneous" = 3
+#   # )) %>%
+#   kable_classic(full_width = FALSE,
+#                           html_font = "Times") %>%
+#   save_kable(file = "Manuscript Tables and Figures/Frobs Table.html")
+
+```
+
+Just empirical matrices for script 9
+
+```{r}
+# load(sprintf("%s/Data/tvn_tvvar.RData", wd))
+# load(sprintf("%s/Data/tvn_contemp.RData", wd))
+#use range of bandwdiths 
+
+#con
+tvn_contemp <- tvn_contemp[-c(179,197,346),] #didnt resample
+combine_signs_and_weights_contemp <- function(tvmgm_entry) {
+  # Extract the weighted adjacency matrix (wadj) and the signs (signs)
+  wadj <- tvmgm_entry[["pairwise"]][["wadj"]][,,]  # Shape: (15x15x1x5)
+  signs <- tvmgm_entry[["pairwise"]][["signs"]][,,]  # Same shape: (15x15x1x5)
+  
+  # Combine signs and weights by multiplying them element-wise
+  full_wadj <- wadj * signs  # (15x15x5)
+  
+  #turn NAs into 0s
+  full_wadj <- ifelse(is.na(full_wadj), 0, full_wadj)
+  
+  # Return the combined weighted adjacency matrices
+  return(full_wadj)
+}
+emp_con_matrices <- tvn_contemp %>%
+  mutate(emp_mat =  map(tvmgm, combine_signs_and_weights_contemp)) %>%
+  select(SID, study, obs, emp_mat) 
+
+save(emp_con_matrices, file = "Data/emp_con_matrices.RData")
+
+#lag
+tvn_tvvar <- tvn_tvvar[-c(164,165),] #didnt resample
+
+
+combine_signs_and_weights_lag <- function(tvvar_entry) {
+  # Extract the weighted adjacency matrix (wadj) and the signs (signs)
+  wadj <- tvvar_entry[["wadj"]][,,,]  # Shape: (15x15x1x5)
+  signs <- tvvar_entry[["signs"]][,,,]  # Same shape: (15x15x1x5)
+  
+  # Combine signs and weights by multiplying them element-wise
+  full_wadj <- wadj * signs  # (15x15x5)
+  
+  #turn NAs into 0s
+  full_wadj <- ifelse(is.na(full_wadj), 0, full_wadj)
+  
+  # Return the combined weighted adjacency matrices
+  return(full_wadj)
+}
+emp_lag_matrices <- tvn_tvvar %>%
+  mutate(emp_mat =  map(tvvar, combine_signs_and_weights_lag)) %>%
+  select(SID, study, obs, emp_mat) 
+
+save(emp_lag_matrices, file = "Data/emp_lag_matrices.RData")
+```
+
+```{r}
+frob_tvn_df <- tvn_frob %>%
+  arrange(study) %>%
+  mutate(study = ifelse(study %in% c("PPS", "CPE"), "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         study = factor(study, levels = c("IPCS", "PPS + CPE", "Soc-Cog"))) %>%
+  select(SID, bandwidth, study, mean_frobenius_norm) %>%
+  rename(tvn_frob = mean_frobenius_norm) 
+
+frob_contemp_df <- contemp_frob %>%
+  arrange(study) %>%
+  mutate(study = ifelse(study %in% c("PPS", "CPE"), "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         study = factor(study, levels = c("IPCS", "PPS + CPE", "Soc-Cog"))) %>%
+  select(SID, bandwidth, study, mean_frobenius_norm) %>%
+  rename(con_frob = mean_frobenius_norm) 
+
+
+full_frob <- frob_tvn_df %>%
+  full_join(frob_contemp_df, join_by(SID)) %>%
+  mutate(study = coalesce(study.x, study.y)) %>%
+  select(SID, study, tvn_frob, con_frob)
+
+
+# Plot histogram of mean Frobenius norms
+#lagged
+
+
+#stacked histograms
+ggplot(frob_tvn_df, aes(x = tvn_frob, fill = study)) +
+  geom_histogram(aes(y = after_stat(count)), 
+                 binwidth = 0.1, 
+                 alpha = 0.6, 
+                 position = "identity", 
+                 color = "black") +
+  scale_fill_manual(values=c(ggpubfigs::friendly_pal("ito_seven")[c(3,1,2)])) + #school colors ;)
+  facet_wrap(~study, ncol = 1, strip.position = "right") + 
+  #scale_x_continuous(breaks = seq(0, 2, by = 0.25), limits = c(0, 2)) +
+   labs(
+    title = "Distribution of Person-Mean Frobenius Norms in Lagged Networks",
+    x = "Mean Frobenius Norm",
+    y = "Frequency"
+  ) +
+  theme(plot.title = element_text(hjust = .5, face = "bold")) +
+  theme(axis.title.x = element_text(size=12, color = "black"),
+        axis.title.y = element_text(size=12, color = "black")) +
+  theme(legend.position = "none",
+        axis.text.y = element_text(size = 10)) 
+
+#contemp
+ggplot(frob_contemp_df, aes(x = con_frob, fill = study)) +
+  geom_histogram(binwidth = 0.5, alpha = 0.7,, color = "black", position = "dodge") +
+  scale_fill_manual(values=c(ggpubfigs::friendly_pal("ito_seven")[3:5])) +
+  labs(
+    title = "Distribution of Person-Mean Frobenius Norms in Contemporaneous Networks",
+    x = "Mean Frobenius Norm",
+    y = "Frequency"
+  ) +
+  theme(plot.title = element_text(size = 12, hjust = .5, face = "bold")) +
+  theme(axis.title.x = element_text(size=10, color = "black"),
+        axis.title.y = element_text(size=10, color = "black"),
+        legend.position = "bottom")
+
+
+range(frob_contemp_df$con_frob)
+
+
+# 2. Compute correlation between mean Frobenius norm and bandwidth
+var_cor_frob_bw <- cor(tvn_frob$mean_frobenius_norm, tvn_frob$bandwidth, use = "complete.obs")
+var_cor_frob_bw
+#nice
+
+contemp_cor_frob_bw <- cor(contemp_frob$mean_frobenius_norm, contemp_frob$bandwidth, use = "complete.obs")
+contemp_cor_frob_bw
+```
+
+```{r}
+{r}
+#exemplar lagged and contemp mean and sd
+tvn_frob %>% filter(SID == 31624)
+tvn_frob %>% filter(SID == 31624) %>% select(frobenius_comparisons) %>% unnest() %>%
+  summarize(sd = sd(frobenius_norm))
+contemp_frob %>% filter(SID == 31624)
+contemp_frob %>% filter(SID == 31624) %>% select(frobenius_comparisons) %>% unnest() %>%
+  summarize(sd = sd(frobenius_norm))
+
+```

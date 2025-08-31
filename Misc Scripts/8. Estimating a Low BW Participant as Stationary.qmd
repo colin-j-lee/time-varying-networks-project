@@ -1,0 +1,108 @@
+---
+title: "8. Estimating a Low BW Participant as Stationary"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, message = FALSE}
+library(qgraph)
+library(mgm)
+library(plyr)
+library(psych)
+library(lavaan)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/p25637.RData", wd))
+load(sprintf("%s/Data/Q_shit.RData", wd))
+
+```
+
+Subset p25637 bw = 0.743, timepoints = 84
+
+```{r}
+p25637data <- data.frame(p25637$data) %>%
+  select(Sociability:CrtvImagination) %>%
+  as.matrix()
+```
+
+Stationary network estimation
+
+```{r}
+p25637_mgm <- mgm(data = p25637data,
+                type = rep("g", 15),
+                levels = rep(1, 15),
+                k = 2, #pairwise mgm
+                lambaSel = "CV",
+                lambdaFolds = 10,
+                ruleReg = "AND") 
+
+
+traitgroups <- list("Extraversion" = c(1:3), #columns in df
+                    "Agreeableness" = c(4:6),
+                    "Conscientiousness" = c(7:9),
+                    "Neuroticism" = c(10:12),
+                    "Openness" = c(13:15)
+                    )
+
+```
+
+graph
+
+```{r}
+theme_set(theme_bw(base_size = 14, base_family="Times") )
+theme_update(legend.position="bottom", 
+             panel.spacing=grid::unit(0,"lines"),
+             strip.background=element_rect(color="black",fill="white"),
+             panel.grid=element_blank())
+
+pdf("p25637 Stationary MGM Network Plot AND.pdf")
+set.seed(420)
+qgraph(p25637_mgm$pairwise$wadj, 
+       layout = Q_shit$layout,
+       edge.color = p25637_mgm$pairwise$edgecolor, 
+       groups = traitgroups, #group traits by color
+       palette = 'colorblind',
+       width = 15 * 1.4, # width of figure
+       height = 16, # height of figure,
+       border.width = 0.5,
+       label.cex = 0.7, # scalar on label size
+       label.color = 'black', # string on label colors
+       label.prop = 0.9, 
+       loop = 0.7,
+       title=(""), 
+       layoutOffset=c(0,0), 
+       GLratio=3.5, 
+       layoutScale=c(.8, .8),
+       minimum = 0.1, #min value for edge to be shown
+       maximum = .5, #max to scale edge weights
+       title.cex=1.5, #title size
+       border.color = "grey60", edge.color = "grey60", 
+       trans=1,fade=F,
+       vTrans = 190, # transparency of the nodes to better determine edges c
+       details = F, shape = "ellipse", node.width=1, node.height=.6, # node appearance
+       vsize = 13, #node size 
+       asize = 4, #arrow head size
+       edge.width=.6,
+       label.font=15, 
+       label.scale=F,
+       #pie = errors, 
+       labels = colnames(p25637data),
+       legend = FALSE,
+       vsize = 15, 
+       esize = 20, mar=c(7,7,7,7))
+dev.off()
+```
+
+Delete later but this is how you check out the models
+
+#mgm() returns a list with the following entries: fit_mgm$call returns the call of the func- tion; fit_mgm$pairwise contains the weighted adjacency matrix and the signs (if defined) of the parameters in the weighted adjacency matrix; fit_mgm$interactions contains a list that shows all recovered interactions (cliques) and a list that returns the parameters asso- ciated with all cliques; fit_mgm$intercepts stores all estimated thresholds/intercepts and fit_mgm$nodemodels is a list with the p glmnet objects from which all above results are computed. We inspect the weigthed adjacency matrix stored in fit_mgm$pairwise\$wadj

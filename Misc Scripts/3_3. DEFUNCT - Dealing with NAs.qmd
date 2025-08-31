@@ -1,0 +1,137 @@
+---
+title: "3_3. NAs"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(qgraph)
+library(mgm)
+library(plyr)
+library(psych)
+library(lavaan)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/tvn_data_bw.RData", wd))
+load(sprintf("%s/Data/tvn_wide.RData", wd))
+#load(sprintf("%s/Data/stationary_na_models.RData", wd)) #this script
+
+```
+
+Subset (only NAs)
+
+```{r}
+tvn_bandwidth_nah <- tvn_data_bw %>%
+  filter(is.na(bandwidth))
+```
+
+Look at n
+
+```{r}
+table(tvn_bandwidth_nah$obs)
+#ok so its not necessarily deficient sample size; min 50 and up to 148
+```
+
+Descriptives
+
+```{r}
+#subset ipcs wide
+na_sid <- tvn_bandwidth_nah$SID
+tvn_wide_na <- tvn_wide %>%
+  filter(SID %in% na_sid)
+
+#make it long
+tvn_long_na <- tvn_wide_na %>%
+  unnest() %>%
+  select(SID, Sociability:CrtvImagination) %>%
+  pivot_longer(
+    cols = Sociability:CrtvImagination
+    , names_to = c("trait")
+    , values_to = "value"
+  ) 
+
+# function for mean, sd, median, min, max, n, n missing
+descriptive_fun <- function(df, var) {
+  df %>%
+  summarize(
+      mean = mean({{ var }},   na.rm = TRUE),
+      sd     = sd({{ var }},     na.rm = TRUE),
+      median = median({{ var }}, na.rm = TRUE),
+      min    = min({{ var }},    na.rm = TRUE),
+      max    = max({{ var }},    na.rm = TRUE),
+      # omega  = omega({{var}}),
+      # alpha  = alpha({{var}}),
+      n      = n(),
+      .groups = "drop"
+      )
+}
+
+na_descriptives <- tvn_long_na %>%
+  group_by(SID, trait) %>% # we want descriptive for each trait for each participant
+  descriptive_fun(var = value) %>% 
+  ungroup()
+
+```
+
+Look at low variance participant-variables
+
+```{r}
+na_descriptives %>%
+  filter(sd < 10) 
+```
+
+Look at median = 0 or 100
+
+```{r}
+na_descriptives %>%
+  filter(median == 0 | median == 100)
+
+```
+
+Alright try wider bw
+
+```{r, eval = FALSE}
+bwSeq <- seq(0.01, 2.5, length =25)
+
+bw_select_fnc <- function(x){
+  bwSelect(data = x %>%
+             select(Sociability:CrtvImagination),
+           type = rep("g", 15), #gaussian
+           level = rep(1, 15), #continuous
+           bwSeq = bwSeq, #bandwidths to try
+           bwFolds = 1, #number of training and test splits; in this case it is just in half
+           bwFoldsize = 20, #size of test sets
+           modeltype = "mvar",
+           lags = 1,
+           scale = TRUE,
+           timepoints = x$time_norm,
+           beepvar = x$beepno,
+           dayvar = x$dayno,
+           pbar = TRUE)
+} 
+```
+
+Do it
+
+```{r, eval = FALSE}
+plan(multisession, workers = 8)
+
+tvn_bandwidth_wider <- future_map(tvn_bandwidth_nah$data,
+                                  function(x) safely(bw_select_fnc(x), 
+                                                     otherwise = NA_real_)
+                                 )
+```
+
+Nah doesn't work: Caused by error in `elnet()`: y is constant; gaussian glmnet fails at standardization step. So seems like the zero inflated variables don't let it run?
+
+Stationary fits in previous script

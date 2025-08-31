@@ -1,0 +1,409 @@
+---
+title: "8. Bandwidth and Frob Tables and Figures"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(mgm)
+library(plyr)
+library(psych)
+library(kableExtra)
+library(furrr)
+library(ggridges)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/tvn_data_bw.RData", wd)) 
+load(sprintf("%s/Data/tvn_contemp_bw.RData", wd)) 
+
+#frob
+load(sprintf("%s/Data/frob_tab_df.RData", wd)) 
+
+```
+
+Get percentages
+
+```{r}
+table(tvn_data_bw$bandwidth<1.5)
+292/392
+table(tvn_contemp_bw$bandwidth<1.5) 
+301/392
+```
+
+```{r}
+#lagged and contemp corr
+bw_cor <- tvn_data_bw %>% full_join(tvn_contemp_bw, by = join_by(SID))
+cor(bw_cor$bandwidth.x, bw_cor$bandwidth.y, use = "complete.obs") #huh
+```
+
+##Table Lagged
+
+```{r}
+#calc proportions 
+lag_prop <- tvn_data_bw %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study)) %>%
+  mutate(bandwidth = ifelse(is.na(bandwidth), 2, bandwidth)) %>% #make NAs stationary for props
+  group_by(study) %>%
+  summarize(lag_bw_prop = sum(bandwidth < 1.5)/length(bandwidth)) %>%
+  arrange(study)
+
+#descriptives
+lag_desc <- tvn_data_bw %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study)) %>%
+  group_by(study) %>%
+  na.omit %>%
+  summarize(lag_median = median(bandwidth, na.rm = TRUE),
+            lag_iqr = IQR(bandwidth, na.rm = TRUE),
+            lag_corr = cor(bandwidth, obs)) %>%
+  arrange(study)
+
+lag_shit <- lag_prop %>% left_join(lag_desc)
+```
+
+Contemporaneous
+
+```{r}
+#calc proportions 
+con_prop <- tvn_contemp_bw %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study)) %>%
+  mutate(bandwidth = ifelse(is.na(bandwidth), 2, bandwidth)) %>% #make NAs stationary for props
+  group_by(study) %>%
+  summarize(con_bw_prop = sum(bandwidth < 1.5)/length(bandwidth)) %>%
+  arrange(study)
+
+#descriptives
+con_desc <- tvn_contemp_bw %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study)) %>%
+  group_by(study) %>%
+  na.omit %>%
+  summarize(con_median = median(bandwidth, na.rm = TRUE),
+            con_iqr = IQR(bandwidth, na.rm = TRUE),
+            con_corr = cor(bandwidth, obs)) %>%
+  arrange(study)
+
+con_shit <- con_prop %>% left_join(con_desc)
+
+```
+
+combine lagged, con, and frob
+
+```{r}
+bw_table <- con_shit %>% left_join(lag_shit) %>%
+  mutate_if(is.numeric, function(x) round(x,2))
+colnames(frob_tab_df)
+bw_table <- bw_table %>%
+  mutate(
+    prop_lag = sprintf("%.0f%%", lag_bw_prop * 100),
+    prop_con = sprintf("%.0f%%", con_bw_prop * 100),
+    lag_med_iqr = sprintf("%.2f (%.2f)", lag_median, lag_iqr),
+    con_med_iqr = sprintf("%.2f (%.2f)", con_median, con_iqr)
+  ) %>%
+  select(study, prop_con, con_med_iqr, con_corr, prop_lag, lag_med_iqr, lag_corr) %>% #order
+  rename(cor_con = con_corr,
+         cor_lag = lag_corr) %>%
+  mutate_all(as.character)  
+
+bw_frob_table <- bind_rows(bw_table, frob_tab_df)
+```
+
+Table
+
+```{r}
+kable(
+  bw_frob_table,
+  escape = F,
+  "html",
+  caption = "<strong>Table 4</strong><br><em>Proportions, Central Tendencies, Spreads, and Observation Correlations For Bandwidths and Frobenius Norms</em>",
+  col.names = c(
+    "Study",
+    "Prop. (%)", "Median (IQR)", "Corr.",
+    "Prop. (%)", "Median (IQR)", "Corr."
+  ),
+  align = c("l",rep("c", 6)) 
+) %>%
+  # 4. Add the top headers for the three studies
+  add_header_above(c(
+    " " = 1,    
+    "Contemporaneous" = 3,    
+    "Lagged" = 3
+  )) %>%
+  pack_rows("Bandwidth", 1, 3) %>%
+  pack_rows("Frobenius Norm", 4, 6) %>%
+  kable_classic(full_width = FALSE, 
+                          html_font = "Times") %>%
+  save_kable(file = "Manuscript Tables and Figures/Bandwidths and Frobs Table.html")
+```
+
+## Figure
+
+Df for figure
+
+```{r}
+#combine lagged and contemp
+bw_plot_df <- tvn_data_bw %>%
+  arrange(study) %>%
+  na.omit () %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         study = factor(study, levels = c("IPCS", "PPS + CPE", "Soc-Cog"))) %>%
+  rename(lag_bw = bandwidth) %>%
+  select(SID, lag_bw, study) %>%
+  full_join(
+    tvn_contemp_bw %>%
+      arrange(study) %>%
+      na.omit () %>%
+      mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study),
+             study = ifelse(study == "Cog", "Soc-Cog", study),
+             study = factor(study, levels = c("IPCS", "PPS + CPE", "Soc-Cog"))) %>%
+      rename(con_bw = bandwidth) %>%
+      select(SID, con_bw, study)
+  )
+    
+#keep the means separate
+bw_means <- tvn_data_bw %>%
+  arrange(study) %>%
+  na.omit () %>%
+  mutate(study = ifelse(study == c("PPS_CPE"), "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         study = factor(study, levels = c("IPCS", "PPS + CPE", "Soc-Cog"))) %>%
+  group_by(study) %>%
+  summarize(mean_lag_bandwidth = mean(bandwidth)) %>%
+  ungroup() %>%
+  left_join(
+  tvn_contemp_bw %>%
+  arrange(study) %>%
+  na.omit () %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS+CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         study = factor(study, levels = c("IPCS", "PPS+CPE", "Soc-Cog"))) %>%
+  group_by(study) %>%
+  summarize(mean_con_bandwidth = mean(bandwidth)) %>%
+  ungroup()
+  )
+
+bw_means_long <- bw_means %>%
+  pivot_longer(cols = c(mean_lag_bandwidth, mean_con_bandwidth), 
+               names_to = "bw_type", 
+               values_to = "mean_bw")
+
+```
+
+Warning is just NAs
+
+```{r, warning = FALSE}
+ito_colors <- ggpubfigs::friendly_pal("ito_seven")
+
+bw_plot <- ggplot(bw_plot_df, aes(x = lag_bw)) +
+  geom_density(aes(fill = "Lagged"), alpha = 0.5, adjust = 0.5) +  
+  geom_density(aes(x = con_bw, fill = "Contemporaneous"), alpha = 0.5, adjust = 0.5) +
+  # geom_vline(data = bw_means_long, 
+  #            aes(xintercept = mean_bw, color = bw_type), 
+  #            size = 1, linetype = "dashed", show.legend = FALSE) + 
+  geom_vline(xintercept = 1.5, color = "black", size = 1, linetype = "dashed") +  
+  coord_cartesian(xlim = c(0, 2.5), expand = FALSE)+
+  scale_x_continuous(breaks = seq(0, 2.5, by = 0.5), limits = c(0, 2.5), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, 2.6),
+                     labels = function(x) ifelse(x == 0, "", x)) + 
+  geom_text(
+  data = subset(bw_plot_df, SID == 2),  
+  aes(x = 1.5, y = 1.78, label = "Stationary"), 
+  size = 6,  
+  fontface = "bold.italic"
+) +
+  geom_segment(
+    data = subset(bw_plot_df, SID == 2), 
+               aes(x = 1.40, xend = 1.6, y = 1.5, yend = 1.5),
+               arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+               size = 1) +
+  facet_wrap(~study, ncol = 1, strip.position = "right") + 
+  scale_fill_manual(name = "", values = c("Lagged" = ito_colors[2], "Contemporaneous" = ito_colors[1])) +  
+  scale_color_manual(values = c("mean_lag_bandwidth" = ito_colors[2], "mean_con_bandwidth" = ito_colors[1])) +
+  theme_minimal() +
+  labs(title = "Density Distributions of Bandwidths For Each Study",
+       x = "Estimated Bandwidth", 
+       y = "Density",
+       fill = "Variable",
+       color = "Mean Type") +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = .5, face = "bold", size = 20),
+        axis.title.x = element_text(size=14, color = "black"),
+        axis.title.y = element_text(size=14, color = "black"),
+        axis.text.y = element_text(size = 8),
+        strip.text = element_text(face = "bold", size= 12),
+        plot.margin = margin(10, 30, 40, 10),
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+        legend.text = element_text(size = 14)  # Adjust size as needed
+
+)
+
+bw_plot
+
+ggsave(
+  "Manuscript Tables and Figures/Bandwidth Density Dist Figure.png", 
+  plot = bw_plot, 
+  width = 12, height = 7, 
+  dpi = 1000, 
+  bg = "white"
+)
+```
+
+Decided not to use code below:
+
+ridges density dists
+
+```{r}
+ggplot(bw_plot_df,
+       aes(x = bandwidth, y = study, fill = study)) +
+  geom_density_ridges(scale = 2, rel_min_height = 0.01, bandwidth = 0.1, alpha = 0.7) +
+  scale_fill_manual(values=c(ggpubfigs::friendly_pal("ito_seven")[c(3,1,2)])) + #school colors ;)
+  geom_vline(aes(xintercept=1.5), color="red", size=1) +
+  geom_vline(aes(xintercept=mean(bandwidth)), color="blue", size=1)+
+  scale_x_continuous(breaks = seq(0, 2, by = 0.25), limits = c(0, 2)) +
+  xlab("Estimated Bandwidth") +
+  ylab("Frequency of Bandwidths") +
+  ggtitle("Distribution of Bandwidths For Each Study") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = .5, face = "bold")) +
+  theme(axis.title.x = element_text(size=14, color = "black"),
+        axis.title.y = element_text(size=14, color = "black")) +
+  theme(legend.position = "none",
+        axis.text.y = element_text(size = 10)) 
+```
+
+histograms
+
+```{r}
+#stacked histograms
+ggplot(bw_plot_df[-197,], aes(x = bandwidth, fill = study)) + #one homie with .01 bw
+  geom_histogram(aes(y = after_stat(count)), 
+                 binwidth = 0.1, 
+                 alpha = 0.6, 
+                 position = "identity", 
+                 color = "black") +
+  scale_fill_manual(values=c(ggpubfigs::friendly_pal("ito_seven")[c(3,1,2)])) + #school colors ;)
+  facet_wrap(~study, ncol = 1, strip.position = "right") + 
+  coord_cartesian(xlim = c(0.1, 2)) +
+  #scale_x_continuous(breaks = seq(0, 2, by = 0.25), limits = c(0, 2)) +
+  geom_vline(aes(xintercept=1.5), color="red", size=1) +
+  geom_vline(aes(xintercept=mean_bandwidth), color="blue", size=1)+
+  theme_bw()+
+  xlab("Estimated Bandwidth") +
+  ylab("Frequency of Bandwidths") +
+  ggtitle("Distribution of Bandwidths For Each Study") +
+  theme(plot.title = element_text(hjust = .5, face = "bold")) +
+  theme(axis.title.x = element_text(size=14, color = "black"),
+        axis.title.y = element_text(size=14, color = "black")) +
+  theme(legend.position = "none",
+        axis.text.y = element_text(size = 10)) 
+
+```
+
+Supplementary table that include means and sd
+
+##Table Lagged
+
+```{r}
+#calc proportions 
+lag_prop <- tvn_data_bw %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study)) %>%
+  mutate(bandwidth = ifelse(is.na(bandwidth), 2, bandwidth)) %>% #make NAs stationary for props
+  group_by(study) %>%
+  summarize(lag_bw_prop = sum(bandwidth < 1.5)/length(bandwidth)) %>%
+  arrange(study)
+
+#descriptives
+lag_desc <- tvn_data_bw %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study)) %>%
+  group_by(study) %>%
+  na.omit %>%
+  summarize(lag_mean = mean(bandwidth, na.rm = TRUE),
+            lag_sd = sd(bandwidth, na.rm = TRUE),
+            lag_median = median(bandwidth, na.rm = TRUE),
+            lag_iqr = IQR(bandwidth, na.rm = TRUE)) %>%
+  arrange(study)
+
+lag_shit <- lag_prop %>% left_join(lag_desc)
+```
+
+Contemporaneous
+
+```{r}
+#calc proportions 
+con_prop <- tvn_contemp_bw %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study)) %>%
+  mutate(bandwidth = ifelse(is.na(bandwidth), 2, bandwidth)) %>% #make NAs stationary for props
+  group_by(study) %>%
+  summarize(con_bw_prop = sum(bandwidth < 1.5)/length(bandwidth)) %>%
+  arrange(study)
+
+#descriptives
+con_desc <- tvn_contemp_bw %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study)) %>%
+  group_by(study) %>%
+  na.omit %>%
+  summarize(con_mean = mean(bandwidth, na.rm = TRUE),
+            con_sd = sd(bandwidth, na.rm = TRUE),
+            con_median = median(bandwidth, na.rm = TRUE),
+            con_iqr = IQR(bandwidth, na.rm = TRUE)) %>%
+  arrange(study)
+
+con_shit <- con_prop %>% left_join(con_desc)
+```
+
+full df and table it
+
+```{r}
+bw_table <- lag_shit %>% left_join(con_shit)
+bw_table[,2:11] <- round(bw_table[,2:11], 2) 
+bw_table <- bw_table %>%
+  mutate(
+    lag_mean_sd = sprintf("%.2f (%.2f)", lag_mean, lag_sd),
+    con_mean_sd = sprintf("%.2f (%.2f)", con_mean, con_sd),
+    lag_bw_prop = sprintf("%.0f%%", lag_bw_prop * 100),
+    con_bw_prop = sprintf("%.0f%%", con_bw_prop * 100),
+    lag_med_iqr = sprintf("%.2f (%.2f)", lag_median, lag_iqr),
+    con_med_iqr = sprintf("%.2f (%.2f)", con_median, con_iqr)
+  ) %>%
+  select(study, lag_bw_prop, lag_mean_sd, lag_med_iqr, con_bw_prop, con_mean_sd, con_med_iqr) %>%
+  mutate_all(as.character)  
+
+#table
+kable(
+  bw_table,
+  escape = F,
+  "html",
+  caption = "<strong>Table 4</strong><br><em>Bandwidth Proportions and Descriptives For Each Study</em>",
+  col.names = c(
+    "Study",
+    "Prop. (%)", "Mean (SD)", "Median (IQR)",
+    "Prop. (%)", "Mean (SD)", "Median (IQR)"
+  ),
+  align = c("l",rep("c", 6))
+) %>%
+  # 4. Add the top headers for the three studies
+  add_header_above(c(
+    " " = 1,    
+    "Lagged" = 3,    
+    "Contemporaneous" = 3
+  )) %>%
+  kable_classic(full_width = FALSE, 
+                          html_font = "Times") %>%
+  save_kable(file = "Manuscript Tables and Figures/Bandwidths Table.html")
+```

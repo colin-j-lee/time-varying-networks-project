@@ -1,0 +1,134 @@
+---
+title: "3_2. Contemporaneous Reliabilities"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(mgm)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/tvn_contemp.RData", wd)) 
+```
+
+##Reliability
+
+Prep
+
+```{r}
+#holy fark i need to matrix the data
+contemp_data_matrix <- tvn_contemp %>%
+  select(SID, data) %>%
+  unnest() %>%
+  select(SID, Sociability:CrtvImagination) %>%
+  nest(.by = SID) %>%
+  mutate(data = map(data, function(x) as.matrix(x, ncol = 15)))
+#wow that made me want to die
+```
+
+```{r}
+plan(multisession, workers = 9)  
+
+# Define safer resampling function
+pers_resample_fnc <- function(tvmgm_object, data, nB = 500, seed_start = 1) {
+  tryCatch({
+    resample(
+      object = tvmgm_object,
+      data = data,
+      nB = nB,
+      blocks = 5,
+      seeds = seed_start:(seed_start + nB - 1),
+      quantiles = c(.05, .95),
+      pbar = FALSE
+    )
+  }, error = function(e) e)
+}
+
+# Create output directory
+dir.create("Data/con_resample_individual", showWarnings = FALSE)
+
+future_pwalk(
+  .l = list(tvmgm_object = tvn_contemp$tvmgm,
+            data = contemp_data_matrix$data,
+            i = seq_len(nrow(tvn_contemp))),
+  .f = function(tvmgm_object, data, i) {
+    result <- pers_resample_fnc(tvmgm_object, data)
+
+    # Clean up large parts of object
+    if (!inherits(result, "error")) {
+      result$bootstrapNetworks <- NULL
+      result$bootstrapErrors <- NULL
+    }
+
+    saveRDS(result, file = sprintf("Data/con_resample_individual/resample_%03d.rds", i))
+  },
+  .options = furrr_options(seed = TRUE)
+)
+
+plan(sequential)
+
+q()
+```
+
+```{r}
+plan(multisession, workers = 9)  
+
+# Load and extract relevant results
+files <- list.files("Data/con_resample_individual", full.names = TRUE)
+
+con_resample_boots <- future_map(files, function(f) {
+  tryCatch({
+    x <- readRDS(f)
+    if (inherits(x, "error")) return(NULL)
+    list(
+      bootParameters = x$bootParameters,
+      bootQuantiles = x$bootQuantiles
+    )
+  }, error = function(e) NULL)
+})
+
+plan(sequential)
+
+
+# Save combined bootstraps
+save(con_resample_boots, file = "Data/con_resample_boots.RData")
+
+# Clean exit
+q()
+
+```
+
+```{r}
+load(sprintf("%s/Data/con_resample_boots.RData", wd)) 
+
+# Function to stack arrays
+process_participant <- function(i) {
+  # Extract boot_parameters from each list
+  boot <- con_resample_boots[[i]][["bootParameters"]]
+  
+  boot <- boot[, , , ,  drop = FALSE]
+}
+
+# hit it
+con_resample_df <- tibble(
+  SID = tvn_contemp$SID,
+  boots = lapply(seq_along(con_resample_boots), process_participant)
+)
+
+#remove nulls
+con_resample_df <- con_resample_df %>%
+  filter(!map_lgl(boots, ~ all(.x == 0)))
+
+save(con_resample_df, file = "Data/con_resample_df.RData")
+```

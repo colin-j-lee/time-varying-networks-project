@@ -1,0 +1,718 @@
+---
+title: "9. Assessing Reliabilities using Frobenius Norm"
+format: html
+editor: visual
+---
+
+I want to:
+
+1.  Calculate the Frobenius norms between the average matrix (across the 200 resamples) and the empirical matrix
+2.  Calculate the descriptives and visualize the sample-level frob distributions
+3.  Visualize the average resample matrix for the two exemplars; this is gonna be 2x5 grid cause no stationary
+
+```{r, load packages and wd, include = FALSE}
+library(mgm)
+library(psych)
+library(lavaan)
+library(furrr)
+library(kableExtra)
+library(abind)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+
+```
+
+Load the chill ones
+
+```{r}
+#full con boot; script 3_2
+load(sprintf("%s/Data/con_resample_df.RData", wd))
+
+#full lag boot; script 2_2
+load(sprintf("%s/Data/lag_resample_df.RData", wd))
+x <- lag_resample_df %>% filter(SID ==31624)
+x$boots
+
+#empirical matrices; script 7
+load(sprintf("%s/Data/emp_con_matrices.RData", wd))
+load(sprintf("%s/Data/emp_lag_matrices.RData", wd))
+
+```
+
+## calculate mean across 
+
+```{r}
+con_boots <- con_resample_df %>%
+  mutate(resample_means = map(boots, function(x) apply(x, c(1, 2, 3), mean))
+  ) %>%
+  select(SID, resample_means)
+
+lag_boots <- lag_resample_df %>%
+  mutate(resample_means = map(boots, function(x) apply(x, c(1, 2, 4), mean)), # Mean over resamples
+         resample_means = map(resample_means, drop) # Drop singleton dimensions
+  ) %>%
+  select(SID, resample_means)
+```
+
+Combine empirical and boot arrays; remove null rows
+
+```{r}
+#con
+con_boots %>%filter(SID== 31624)
+con_boots <- emp_con_matrices %>%
+  left_join(con_boots)
+#remove nulls
+con_boots <- con_boots %>%
+  filter(!map_lgl(resample_means, ~ all(.x == 0)))
+
+#lag
+lag_boots <- emp_lag_matrices %>%
+  left_join(lag_boots)
+
+#remove nulls
+lag_boots <- lag_boots %>%
+  filter(!map_lgl(resample_means, ~ all(.x == 0)))
+```
+
+Frob comparison between empirical and boots
+
+```{r}
+# Function to compute Frobenius norm
+frobenius_empirical_vs_resampled <- function(empirical_matrix, resampled_matrix) {
+  norm(empirical_matrix - resampled_matrix, type = "F")
+}
+
+#Con first
+con_boots <- con_boots %>%
+  rowwise() %>%
+  mutate(
+    con_frob = list(map_dbl(1:5, ~frobenius_empirical_vs_resampled(emp_mat[,,.x], resample_means[,,.x])))
+  ) %>%
+  ungroup() %>%
+  unnest(con_frob)  # Expand list into separate rows
+
+# Compute average Frobenius norm per SID
+con_boots_avg <- con_boots %>%
+  group_by(SID,study,obs) %>%
+  summarise(avg_con_frob = mean(con_frob, na.rm = TRUE)) %>%
+  ungroup()
+
+#Now lag
+lag_boots <- lag_boots %>%
+  rowwise() %>%
+  mutate(
+    lag_frob = list(map_dbl(1:5, ~frobenius_empirical_vs_resampled(emp_mat[,,.x], resample_means[,,.x])))
+  ) %>%
+  ungroup() %>%
+  unnest(lag_frob)  # Expand list into separate rows
+
+# Compute average Frobenius norm per SID
+lag_boots_avg <- lag_boots %>%
+  group_by(SID,study,obs) %>%
+  summarise(avg_lag_frob = mean(lag_frob, na.rm = TRUE)) %>%
+  ungroup()
+
+#combine con and lag
+frob_boots <- con_boots_avg %>%
+  full_join(lag_boots_avg)
+
+#exemplar
+frob_boots %>% filter(SID == 31624)
+frob_boots$SID
+```
+
+```{r}
+#study stuff
+frob_boots <- frob_boots %>%
+  arrange(study) %>%
+  mutate(study = ifelse(study =="PPS_CPE", "PPS + CPE", study),
+         study = ifelse(study == "Cog", "Soc-Cog", study),
+         study = factor(study, levels = c("IPCS", "PPS + CPE", "Soc-Cog"))
+         ) 
+
+#keep the sample medians separate for plotting vertical lines
+frob_medians <- lag_boots_avg %>%
+  arrange(study) %>%
+  na.omit () %>%
+  mutate(median_lag_frob = median(avg_lag_frob)) %>%
+  left_join(
+  con_boots_avg %>%
+  arrange(study) %>%
+  na.omit () %>%
+    mutate(median_con_frob = median(avg_con_frob))
+  )
+
+frob_medians <- frob_medians[1,] %>%
+  select(median_lag_frob, median_con_frob) %>%
+  pivot_longer(cols = c(median_lag_frob, median_con_frob),
+               names_to = "frob_type",
+               values_to = "median_frob")
+```
+
+Plot
+
+```{r}
+ito_colors <- ggpubfigs::friendly_pal("ito_seven")
+
+reliabilities_plot <- ggplot(frob_boots, aes(x = avg_lag_frob)) +
+  geom_density(aes(fill = "Lagged"), alpha = 0.5, adjust = 0.5) +  
+  geom_density(aes(x = avg_con_frob, fill = "Contemporaneous"), alpha = 0.5, adjust = 0.5) + 
+  geom_vline(data = frob_medians, 
+             aes(xintercept = median_frob, color = frob_type), 
+             linewidth = 1, linetype = "dashed", show.legend = FALSE) + 
+  coord_cartesian(xlim = c(0, 4.1), expand = FALSE)+
+  #facet_wrap(~study, ncol = 1, strip.position = "right") + 
+  scale_fill_manual(name = "", values = c("Lagged" = ito_colors[2], "Contemporaneous" = ito_colors[1])) +  
+  scale_color_manual(values = c("median_lag_frob" = ito_colors[2], "median_con_frob" = ito_colors[1])) +
+  theme_minimal() +
+  labs(title = "Density Distributions of Frobenius Norms Between \n Empirical and Resampled Matrices Across Studies",
+       x = "Frobenius Norm", 
+       y = "Density",
+       fill = "Variable",
+       color = "Median Type") +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = .5, face = "bold", size = 20),
+        axis.title.x = element_text(size=14, color = "black"),
+        axis.title.y = element_text(size=14, color = "black"),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        plot.margin = margin(10, 30, 40, 10),
+        legend.text = element_text(size = 14)  # Adjust size as needed
+  )
+
+
+#the warning is the NAs
+
+ggsave(
+  "Manuscript Tables and Figures/Reliabilities Dist Figure.png", 
+  plot = reliabilities_plot, 
+  width = 12, height = 7, 
+  dpi = 1000, 
+  bg = "white"
+)
+
+reliabilities_plot
+```
+
+Descriptives
+
+```{r}
+frob_boots %>%
+  summarize(lag_median = median(avg_lag_frob, na.rm = TRUE),
+            lag_iqr = IQR(avg_lag_frob, na.rm = TRUE),
+            cor_lag = cor(avg_lag_frob, obs, use = "pairwise.complete.obs"),
+            range_lag = range(avg_lag_frob, na.rm =TRUE),
+            con_median = median(avg_con_frob, na.rm = TRUE),
+            con_iqr = IQR(avg_con_frob, na.rm = TRUE),
+            cor_con = cor(avg_con_frob, obs, use = "pairwise.complete.obs"),
+            range_con = range(avg_con_frob, na.rm =TRUE)
+)
+```
+
+# Null Frob to figure out what the lowest the hard cutoff can be
+
+```{r}
+# Modified function to generate and analyze null distribution of Frobenius norms
+analyze_null_distribution <- function(tvn_con_resample_boots, lag_resample_df, 
+                                      num_null_comparisons = 1000) {
+  
+  # Set random seed for reproducibility
+  set.seed(42)
+  
+  # Create empty vectors to store null distribution results
+  null_con_frobs <- numeric(num_null_comparisons)
+  null_lag_frobs <- numeric(num_null_comparisons)
+  
+  # Get number of participants
+  con_participants <- unique(tvn_con_resample_boots$SID)
+  lag_participants <- unique(lag_resample_df$SID)
+  
+  # For contemporaneous matrices
+  for (i in 1:num_null_comparisons) {
+    # Randomly select TWO participants (can be the same)
+    participant1 <- sample(con_participants, 1)
+    participant2 <- sample(con_participants, 1)
+    
+    # Get the boot arrays
+    p1_data <- tvn_con_resample_boots %>% filter(SID == participant1)
+    p2_data <- tvn_con_resample_boots %>% filter(SID == participant2)
+    
+    boot_array1 <- p1_data$boots[[1]]
+    boot_array2 <- p2_data$boots[[1]]
+    
+    # Randomly select a network (1-5)
+    random_network <- sample(1:5, 1)
+    
+    # Determine the number of resamples available for each participant
+    n_resamples1 <- dim(boot_array1)[3]
+    n_resamples2 <- dim(boot_array2)[3]
+    
+    # Randomly select one resample from each participant
+    resample_idx1 <- sample(1:n_resamples1, 1)
+    resample_idx2 <- sample(1:n_resamples2, 1)
+    
+    # Extract the resampled matrices
+    # Note: adjust indices if needed based on your data structure
+    matrix1 <- try(boot_array1[, , resample_idx1, random_network, 1], silent = TRUE)
+    matrix2 <- try(boot_array2[, , resample_idx2, random_network, 1], silent = TRUE)
+    
+    # Check if extraction was successful
+    if (inherits(matrix1, "try-error") || inherits(matrix2, "try-error")) {
+      # Try alternative indexing if the first attempt failed
+      matrix1 <- try(boot_array1[, , resample_idx1, 1, random_network], silent = TRUE)
+      matrix2 <- try(boot_array2[, , resample_idx2, 1, random_network], silent = TRUE)
+    }
+    
+    # Calculate Frobenius norm if both matrices were extracted successfully
+    if (!inherits(matrix1, "try-error") && !inherits(matrix2, "try-error")) {
+      null_con_frobs[i] <- norm(matrix1 - matrix2, type = "F")
+    } else {
+      null_con_frobs[i] <- NA
+    }
+  }
+  
+  # For lagged matrices
+  for (i in 1:num_null_comparisons) {
+    # Randomly select TWO participants (can be the same)
+    participant1 <- sample(lag_participants, 1)
+    participant2 <- sample(lag_participants, 1)
+    
+    # Get the boot arrays
+    p1_data <- lag_resample_df %>% filter(SID == participant1)
+    p2_data <- lag_resample_df %>% filter(SID == participant2)
+    
+    boot_array1 <- p1_data$boots[[1]]
+    boot_array2 <- p2_data$boots[[1]]
+    
+    # Randomly select a network (1-5)
+    random_network <- sample(1:5, 1)
+    
+    # Determine the number of resamples available for each participant
+    n_resamples1 <- dim(boot_array1)[3]
+    n_resamples2 <- dim(boot_array2)[3]
+    
+    # Randomly select one resample from each participant
+    resample_idx1 <- sample(1:n_resamples1, 1)
+    resample_idx2 <- sample(1:n_resamples2, 1)
+    
+    # Extract the resampled matrices
+    # Try both indexing patterns since we're not sure which is correct
+    matrix1 <- try(boot_array1[, , resample_idx1, 1, random_network], silent = TRUE)
+    matrix2 <- try(boot_array2[, , resample_idx2, 1, random_network], silent = TRUE)
+    
+    # Check if extraction was successful
+    if (inherits(matrix1, "try-error") || inherits(matrix2, "try-error")) {
+      # Try alternative indexing if the first attempt failed
+      matrix1 <- try(boot_array1[, , resample_idx1, random_network, 1], silent = TRUE)
+      matrix2 <- try(boot_array2[, , resample_idx2, random_network, 1], silent = TRUE)
+    }
+    
+    # Calculate Frobenius norm if both matrices were extracted successfully
+    if (!inherits(matrix1, "try-error") && !inherits(matrix2, "try-error")) {
+      null_lag_frobs[i] <- norm(matrix1 - matrix2, type = "F")
+    } else {
+      null_lag_frobs[i] <- NA
+    }
+  }
+  
+  # Remove NAs
+  null_con_frobs <- null_con_frobs[!is.na(null_con_frobs)]
+  null_lag_frobs <- null_lag_frobs[!is.na(null_lag_frobs)]
+  
+  # Create a data frame with the null distributions
+  null_distributions <- data.frame(
+    con_frob = null_con_frobs,
+    lag_frob = null_lag_frobs
+  )
+  
+  # Calculate summary statistics
+  null_summary <- data.frame(
+    model_type = c("Contemporaneous", "Lagged"),
+    min_frob = c(min(null_con_frobs), min(null_lag_frobs)),
+    q5_frob = c(quantile(null_con_frobs, 0.05), quantile(null_lag_frobs, 0.05)),
+    median_frob = c(median(null_con_frobs), median(null_lag_frobs)),
+    mean_frob = c(mean(null_con_frobs), mean(null_lag_frobs)),
+    q95_frob = c(quantile(null_con_frobs, 0.95), quantile(null_lag_frobs, 0.95)),
+    max_frob = c(max(null_con_frobs), max(null_lag_frobs))
+  )
+  
+  # Plotting function for null distributions
+  plot_null_distributions <- function(null_distributions) {
+    # Reshape for ggplot
+    null_long <- pivot_longer(null_distributions, 
+                              cols = c(con_frob, lag_frob),
+                              names_to = "model_type", 
+                              values_to = "frob_norm")
+    
+    # Convert factor levels
+    null_long$model_type <- factor(null_long$model_type,
+                                   levels = c("con_frob", "lag_frob"),
+                                   labels = c("Contemporaneous", "Lagged"))
+    
+    # Set colors
+    ito_colors <- ggpubfigs::friendly_pal("ito_seven")
+    
+    # Create plot
+    null_plot <- ggplot(null_long, aes(x = frob_norm, fill = model_type)) +
+      geom_density(alpha = 0.5) +
+      geom_vline(data = null_summary, 
+                 aes(xintercept = median_frob, color = model_type),
+                 linetype = "dashed", linewidth = 1) +
+      scale_fill_manual(name = "", values = c("Contemporaneous" = ito_colors[1], "Lagged" = ito_colors[2])) +
+      scale_color_manual(name = "", values = c("Contemporaneous" = ito_colors[1], "Lagged" = ito_colors[2])) +
+      theme_minimal() +
+      labs(title = "Null Distribution: Frobenius Norms Between Pairs of Resampled Matrices",
+           subtitle = "Showing the baseline variability inherent in the resampling process",
+           x = "Frobenius Norm", 
+           y = "Density") +
+      theme(legend.position = "bottom",
+            plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+            plot.subtitle = element_text(hjust = 0.5),
+            axis.title = element_text(size = 14),
+            axis.text = element_text(size = 12))
+    
+    return(null_plot)
+  }
+  
+  # Compare empirical vs null distributions - need to be defined outside to be used
+  compare_empirical_to_null <- function(frob_boots, null_distributions) {
+    # Calculate participant means for empirical data (from your previous code)
+    emp_participant_means <- frob_boots %>%
+      group_by(SID) %>%
+      summarize(
+        avg_con_frob = mean(avg_con_frob, na.rm = TRUE),
+        avg_lag_frob = mean(avg_lag_frob, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    # Create summary data for empirical distributions
+    emp_summary <- data.frame(
+      model_type = c("Contemporaneous", "Lagged"),
+      min_frob = c(min(emp_participant_means$avg_con_frob, na.rm = TRUE), 
+                   min(emp_participant_means$avg_lag_frob, na.rm = TRUE)),
+      median_frob = c(median(emp_participant_means$avg_con_frob, na.rm = TRUE), 
+                      median(emp_participant_means$avg_lag_frob, na.rm = TRUE)),
+      mean_frob = c(mean(emp_participant_means$avg_con_frob, na.rm = TRUE), 
+                    mean(emp_participant_means$avg_lag_frob, na.rm = TRUE))
+    )
+    
+    # Calculate signal-to-noise ratio
+    snr_results <- data.frame(
+      model_type = c("Contemporaneous", "Lagged"),
+      empirical_median = emp_summary$median_frob,
+      null_median = null_summary$median_frob,
+      signal_to_noise_ratio = emp_summary$median_frob / null_summary$median_frob,
+      irreducible_difference = null_summary$min_frob
+    )
+    
+    # Prepare data for comparative plot
+    emp_data <- pivot_longer(emp_participant_means, 
+                             cols = c(avg_con_frob, avg_lag_frob),
+                             names_to = "model_type", 
+                             values_to = "frob_norm") %>%
+      mutate(data_type = "Empirical vs Resample",
+             model_type = ifelse(model_type == "avg_con_frob", "Contemporaneous", "Lagged"))
+    
+    null_data <- pivot_longer(null_distributions, 
+                              cols = c(con_frob, lag_frob),
+                              names_to = "model_type", 
+                              values_to = "frob_norm") %>%
+      mutate(data_type = "Resample vs Resample",
+             model_type = ifelse(model_type == "con_frob", "Contemporaneous", "Lagged"))
+    
+    combined_data <- bind_rows(emp_data, null_data) %>%
+      mutate(model_type = factor(model_type),
+             data_type = factor(data_type))
+    
+    # Create comparative plot
+    ito_colors <- ggpubfigs::friendly_pal("ito_seven")
+    comparison_plot <- ggplot(combined_data, aes(x = frob_norm, fill = data_type)) +
+      geom_density(alpha = 0.5) +
+      facet_wrap(~model_type, ncol = 1) +
+      scale_fill_manual(values = c("Empirical vs Resample" = ito_colors[3], 
+                                   "Resample vs Resample" = ito_colors[4])) +
+      theme_minimal() +
+      labs(title = "Comparison of Empirical and Null Distributions",
+           subtitle = "Showing the difference between empirical-resample and resample-resample comparisons",
+           x = "Frobenius Norm", 
+           y = "Density",
+           fill = "Comparison Type") +
+      theme(legend.position = "bottom",
+            plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+            plot.subtitle = element_text(hjust = 0.5),
+            axis.title = element_text(size = 14),
+            axis.text = element_text(size = 12))
+    
+    return(list(comparison_plot = comparison_plot, 
+                snr_results = snr_results))
+  }
+  
+  # Return results
+  return(list(
+    null_distributions = null_distributions,
+    null_summary = null_summary,
+    null_plot = plot_null_distributions(null_distributions),
+    compare = compare_empirical_to_null
+  ))
+}
+```
+
+```{r}
+# Usage:
+null_analysis <- analyze_null_distribution(tvn_con_resample_boots, lag_resample_df)
+
+# View summary statistics
+print(null_analysis[["null_summary"]])
+
+# Display null distribution plot
+null_analysis$null_plot
+# 
+# # Compare to empirical results (assuming frob_combined exists)
+# comparison_results <- null_analysis$compare(frob_boots)
+# 
+# # View signal-to-noise ratio results
+# print(comparison_results$snr_results)
+# 
+# # Display comparison plot
+# comparison_results$comparison_plot
+# 
+# str(tvn_con_resample_boots$boots[[1]]
+```
+
+## Alt; compare matrix to each resampled matrix then avg
+
+```{r}
+# For contemporaneous matrices
+con_boots <- tvn_con_resample_boots %>%
+  select(SID, boots)
+
+# For lagged matrices
+lag_boots <- lag_resample_df %>%
+  select(SID, boots)
+
+# Combine empirical and boot arrays
+con_boots <- emp_con_matrices %>%
+  left_join(con_boots)
+
+lag_boots <- emp_lag_matrices %>%
+  left_join(lag_boots)
+
+# Function to compute average Frobenius norm between one empirical matrix and all resampled matrices
+compute_avg_frob_norm <- function(empirical_matrix, boot_array, network_idx) {
+  # Extract the empirical matrix for the specific network
+  emp_mat <- empirical_matrix[,,network_idx]
+  
+  # Extract all resampled matrices for this network
+  # Adjust dimensions based on your actual data structure
+  num_resamples <- dim(boot_array)[3]
+  
+  # Calculate Frobenius norm for each resample
+  frob_norms <- numeric(num_resamples)
+  for(i in 1:num_resamples) {
+    # Access the i-th resampled matrix for the specific network
+    # Adjust the indexing based on your actual data structure
+    resamp_mat <- boot_array[,,i,network_idx,1]  # For contemporaneous
+    # or resamp_mat <- boot_array[,,i,1,network_idx]  # For lagged (adjust as needed)
+    
+    frob_norms[i] <- norm(emp_mat - resamp_mat, type = "F")
+  }
+  
+  # Return the average Frobenius norm
+  return(mean(frob_norms, na.rm = TRUE))
+}
+
+# For contemporaneous matrices
+con_frob_results <- con_boots %>%
+  rowwise() %>%
+  mutate(
+    network1_frob = compute_avg_frob_norm(emp_mat, boots, 1),
+    network2_frob = compute_avg_frob_norm(emp_mat, boots, 2),
+    network3_frob = compute_avg_frob_norm(emp_mat, boots, 3),
+    network4_frob = compute_avg_frob_norm(emp_mat, boots, 4),
+    network5_frob = compute_avg_frob_norm(emp_mat, boots, 5)
+  ) %>%
+  ungroup()
+
+# For lagged matrices (may need dimension adjustment)
+lag_frob_results <- lag_boots %>%
+  rowwise() %>%
+  mutate(
+    network1_frob = compute_avg_frob_norm(emp_mat, boots, 1),
+    network2_frob = compute_avg_frob_norm(emp_mat, boots, 2),
+    network3_frob = compute_avg_frob_norm(emp_mat, boots, 3),
+    network4_frob = compute_avg_frob_norm(emp_mat, boots, 4),
+    network5_frob = compute_avg_frob_norm(emp_mat, boots, 5)
+  ) %>%
+  ungroup()
+
+# Reshape to long format if needed
+con_frob_long <- con_frob_results %>%
+  select(SID, study, obs, contains("_frob")) %>%
+  pivot_longer(
+    cols = contains("_frob"),
+    names_to = "network",
+    values_to = "avg_con_frob"
+  )
+
+lag_frob_long <- lag_frob_results %>%
+  select(SID, study, obs, contains("_frob")) %>%
+  pivot_longer(
+    cols = contains("_frob"),
+    names_to = "network",
+    values_to = "avg_lag_frob"
+  )
+
+# Combine contemporaneous and lagged results
+frob_combined <- con_frob_long %>%
+  full_join(lag_frob_long, by = c("SID", "study", "obs", "network"))
+
+# Example output for a specific participant
+frob_combined %>% filter(SID == 31624)
+
+# First, calculate the average Frobenius norm per participant for each model type
+# This aggregates across all networks/matrices per participant
+avg_frob_per_participant <- frob_combined %>%
+  group_by(SID, study, obs) %>%
+  summarize(
+    avg_con_frob = mean(avg_con_frob, na.rm = TRUE),
+    avg_lag_frob = mean(avg_lag_frob, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Calculate the medians across all participants for plotting
+frob_medians <- avg_frob_per_participant %>%
+  summarize(
+    median_lag_frob = median(avg_lag_frob, na.rm = TRUE),
+    median_con_frob = median(avg_con_frob, na.rm = TRUE)
+  ) %>%
+  pivot_longer(
+    cols = c(median_lag_frob, median_con_frob),
+    names_to = "frob_type",
+    values_to = "median_frob"
+  )
+
+# Plot
+ito_colors <- ggpubfigs::friendly_pal("ito_seven")
+
+reliabilities_plot <- ggplot(avg_frob_per_participant, aes(x = avg_lag_frob)) +
+  geom_density(aes(fill = "Lagged"), alpha = 0.5, adjust = 0.5) +  
+  geom_density(aes(x = avg_con_frob, fill = "Contemporaneous"), alpha = 0.5, adjust = 0.5) + 
+  geom_vline(
+    data = frob_medians, 
+    aes(xintercept = median_frob, color = frob_type), 
+    linewidth = 1, 
+    linetype = "dashed", 
+    show.legend = FALSE
+  ) + 
+  coord_cartesian(xlim = c(0, 4.1), expand = FALSE) +
+  scale_fill_manual(
+    name = "", 
+    values = c("Lagged" = ito_colors[2], "Contemporaneous" = ito_colors[1])
+  ) +  
+  scale_color_manual(
+    values = c("median_lag_frob" = ito_colors[2], "median_con_frob" = ito_colors[1])
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Density Distributions of Frobenius Norms Between \n Empirical and Resampled Matrices",
+    x = "Frobenius Norm", 
+    y = "Density",
+    fill = "Variable",
+    color = "Median Type"
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = .5, face = "bold", size = 20),
+    axis.title.x = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    plot.margin = margin(10, 30, 40, 10),
+    legend.text = element_text(size = 14)
+  )
+
+# Save the plot
+ggsave(
+  "Manuscript Tables and Figures/Reliabilities Dist Figure.png", 
+  plot = reliabilities_plot, 
+  width = 12, height = 7, 
+  dpi = 1000, 
+  bg = "white"
+)```
+
+## Figure
+# First, calculate the average Frobenius norm per participant for each model type
+# This aggregates across all networks/matrices per participant
+avg_frob_per_participant <- frob_combined %>%
+  group_by(SID, study, obs) %>%
+  summarize(
+    avg_con_frob = mean(avg_con_frob, na.rm = TRUE),
+    avg_lag_frob = mean(avg_lag_frob, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Calculate the medians across all participants for plotting
+frob_medians <- avg_frob_per_participant %>%
+  summarize(
+    median_lag_frob = median(avg_lag_frob, na.rm = TRUE),
+    median_con_frob = median(avg_con_frob, na.rm = TRUE)
+  ) %>%
+  pivot_longer(
+    cols = c(median_lag_frob, median_con_frob),
+    names_to = "frob_type",
+    values_to = "median_frob"
+  )
+
+# Plot
+ito_colors <- ggpubfigs::friendly_pal("ito_seven")
+
+reliabilities_plot <- ggplot(avg_frob_per_participant, aes(x = avg_lag_frob)) +
+  geom_density(aes(fill = "Lagged"), alpha = 0.5, adjust = 0.5) +  
+  geom_density(aes(x = avg_con_frob, fill = "Contemporaneous"), alpha = 0.5, adjust = 0.5) + 
+  geom_vline(
+    data = frob_medians, 
+    aes(xintercept = median_frob, color = frob_type), 
+    linewidth = 1, 
+    linetype = "dashed", 
+    show.legend = FALSE
+  ) + 
+  coord_cartesian(xlim = c(0, 4.1), expand = FALSE) +
+  scale_fill_manual(
+    name = "", 
+    values = c("Lagged" = ito_colors[2], "Contemporaneous" = ito_colors[1])
+  ) +  
+  scale_color_manual(
+    values = c("median_lag_frob" = ito_colors[2], "median_con_frob" = ito_colors[1])
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Density Distributions of Frobenius Norms Between \n Empirical and Resampled Matrices",
+    x = "Frobenius Norm", 
+    y = "Density",
+    fill = "Variable",
+    color = "Median Type"
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = .5, face = "bold", size = 20),
+    axis.title.x = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    plot.margin = margin(10, 30, 40, 10),
+    legend.text = element_text(size = 14)
+  )
+
+# Save the plot
+ggsave(
+  "Manuscript Tables and Figures/Reliabilities Dist Figure.png", 
+  plot = reliabilities_plot, 
+  width = 12, height = 7, 
+  dpi = 1000, 
+  bg = "white"
+)
+```

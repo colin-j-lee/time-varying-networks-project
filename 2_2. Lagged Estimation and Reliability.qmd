@@ -1,0 +1,208 @@
+---
+title: "2_2. TVVAR Estimation"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(mgm)
+library(plyr)
+library(psych)
+library(lavaan)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+#load(sprintf("%s/Data/tvn_data_bw.RData", wd))
+load(sprintf("%s/Data/tvn_tvvar.RData", wd)) #this script; dont fuckin open it it crashes R
+#load(sprintf("%s/Data/tvn_resample.RData", wd)) #this script 
+
+```
+
+Subset (no NA bandwidths)
+
+```{r}
+tvn_data_bw <- tvn_data_bw %>%
+ filter(!is.na(bandwidth)) #lost 42 ppl
+
+```
+
+table of obs
+
+```{r}
+table(tvn_data_bw$obs)
+```
+
+Estimate Model using bandwidth that minimizes Mean absolute error.
+
+Initial attempt used 20 estimation points, following Haslbeck 2021 tutorial. Changed to 5 because 20 estimation points for a 14 day EMA estimates local models that are shorter than a day. Because we will be estimating contemporaneous graphical models, this seems unnecessary.
+
+Function
+
+```{r}
+pers_tvvar_function <- function(x, bandwidth){
+  tvmvar(data = x %>%
+           select(Sociability:CrtvImagination),
+         type = rep("g", 15),
+         level = rep(1, 15), 
+         lambdaSel = "CV",
+         timepoints = x$time_norm, 
+         estpoints = seq(0, 1, length = 5), 
+         bandwidth = bandwidth,
+         lags = 1,
+         threshold = "HW", 
+         beepvar = x$beepno,
+         dayvar = x$dayno,
+         scale = TRUE,
+         pbar = TRUE)
+}
+```
+
+Function on no NA tibble
+
+```{r, warning = FALSE}
+plan(multisession, workers = availableCores() - 1)
+
+tvn_tvvar <- tvn_data_bw %>%
+  mutate(tvvar = future_map2(.x = tvn_data_bw$data, .y = tvn_data_bw$bandwidth,
+                          safely(pers_tvvar_function),
+                          .progress=TRUE))
+
+plan(sequential)
+
+#remove error element
+tvn_tvvar <- tvn_tvvar %>%
+  mutate(tvvar = map(tvvar, ~ .$result))
+
+save(tvn_tvvar, file = "Data/tvn_tvvar.RData")
+
+q()
+
+```
+
+Get a look at the models; how much data was used.
+
+Cut participants with less than 50 time points used
+
+LOL NVM
+
+```{r}
+# tvn_rows <- list()
+# for(i in 1:nrow(tvn_tvvar)){
+#   tvn_rows[[i]] <- tvn_tvvar$tvvar[[i]][["call"]][["data_lagged"]][["included"]]
+# }
+# 
+# #cut em and keep relevant variables
+# tvn_tvvar <- tvn_tvvar %>%
+#   mutate(tvn_rows = map_vec(tvn_rows, sum)) %>%
+#   filter(tvn_rows >= 50) %>% #lost 101 jfc :(
+#   select(SID, study, data, bandwidth, tvvar, tvn_rows)
+
+
+```
+
+##Reliability
+
+```{r}
+plan(multisession, workers = 8)  
+
+# Define safer resampling function
+pers_resample_fnc <- function(tvvar_object, data, nB = 500, seed_start = 1) {
+  tryCatch({
+    resample(
+      object = tvvar_object,
+      data = data %>% select(Sociability:CrtvImagination),
+      nB = nB,
+      blocks = 5,
+      seeds = seed_start:(seed_start + nB - 1),
+      quantiles = c(.05, .95),
+      pbar = FALSE
+    )
+  }, error = function(e) e)
+}
+
+# Create output directory
+dir.create("Data/lag_resample_individual", showWarnings = FALSE)
+
+future_pwalk(
+  .l = list(tvvar_object = tvn_tvvar$tvvar,
+            data = tvn_tvvar$data,
+            i = seq_len(nrow(tvn_tvvar))),
+  .f = function(tvvar_object, data, i) {
+    result <- pers_resample_fnc(tvvar_object, data)
+
+    # Clean up large parts of object
+    if (!inherits(result, "error")) {
+      result$bootstrapNetworks <- NULL
+      result$bootstrapErrors <- NULL
+    }
+
+    saveRDS(result, file = sprintf("Data/lag_resample_individual/resample_%03d.rds", i))
+  },
+  .options = furrr_options(seed = TRUE)
+)
+
+plan(sequential)
+
+q()
+```
+
+```{r}
+plan(multisession, workers = 9)  
+
+# Load and extract relevant results
+files <- list.files("Data/lag_resample_individual", full.names = TRUE)
+
+lag_resample_boots <- future_map(files, function(f) {
+  tryCatch({
+    x <- readRDS(f)
+    if (inherits(x, "error")) return(NULL)
+    list(
+      bootParameters = x$bootParameters,
+      bootQuantiles = x$bootQuantiles
+    )
+  }, error = function(e) NULL)
+})
+
+plan(sequential)
+
+
+# Save combined bootstraps
+save(lag_resample_boots, file = "Data/lag_resample_boots.RData")
+# 
+# # Clean exit
+# q()
+
+```
+
+```{r}
+load(sprintf("%s/Data/lag_resample_boots.RData", wd)) 
+
+# Function to stack arrays
+process_participant <- function(i) {
+  # Extract boot_parameters from each list
+  boot <- lag_resample_boots[[i]][["bootParameters"]]
+  
+  boot <- boot[, , , , , drop = FALSE]
+}
+
+# hit it
+lag_resample_df <- tibble(
+  SID = tvn_tvvar$SID,
+  boots = lapply(seq_along(lag_resample_boots), process_participant)
+)
+
+#remove nulls
+lag_resample_df <- lag_resample_df %>%
+  filter(!map_lgl(boots, ~ all(.x == 0)))
+
+save(lag_resample_df, file = "Data/lag_resample_df.RData")
+```

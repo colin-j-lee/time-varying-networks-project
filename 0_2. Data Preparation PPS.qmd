@@ -1,0 +1,383 @@
+---
+title: "0_2. Data Preparation PPS"
+author: "Colin J Lee"
+format: 
+  html:
+    code-tools: true
+    code-copy: true
+    code-line-numbers: true
+    code-link: true
+    theme: united
+    highlight-style: tango
+    df-print: paged
+    code-fold: show
+    toc: true
+    toc-float: true
+    self-contained: true
+---
+
+```{r, include = FALSE}
+library(lubridate)
+library(janitor)
+library(Amelia)
+library(plyr)
+library(psych)
+library(lavaan)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Read in data and codebooks
+
+```{r, codebook and data, include = FALSE}
+pp_wide <- read_csv("Raw Data/pps_wide_2025-01-09.csv")
+
+pp_codebook <- sprintf("%s/Codebooks/pps_esm_codebook.xlsx", wd) %>%
+  readxl::read_xlsx(., sheet = "Sheet1")
+
+#initial ids for demographics
+pp_ids_pre <- unique(pp_wide$SID)
+
+save(pp_ids_pre, file = "Data/pp_ids_pre.RData")
+
+```
+
+Clean up codebooks
+
+```{r}
+pp_codebook <- pp_codebook %>%
+  row_to_names(row_number = 1)
+
+#remove all rows not related to traits, emotions, and DIAMONDS
+#and remove sad and anxiety emotion, redundant with neuroticism
+pp_codebook <- pp_codebook[-c(61:63,72:74, 76, 80, 89:186),]
+```
+## PPS
+
+Clean pp so it only has relevant variables (trait states, emotions, DIAMONDS)
+
+```{r}
+pp_wide <- pp_wide %>%
+  select(SID:EM10, N01:N12, O01:O12) %>%
+  arrange(SID, Date) %>%
+  select(-StartDate)
+```
+
+```{r, clean and min assessments}
+### how many participants initially in dataset?
+pp_wide %>%
+  group_by(SID) %>%
+  distinct(SID) %>%
+  nrow() #178
+
+# Min 50 obs
+pp_wide <- pp_wide %>%
+  group_by(SID) %>%
+  filter(n() >= 50) %>% 
+  arrange(SID, Date) %>%
+  mutate(all_beeps = seq(1, n(), 1)) %>%
+  ungroup()
+
+length(unique(pp_wide$SID)) #98
+
+survey_count <- pp_wide %>% group_by(SID) %>% count() %>% ungroup() %>% arrange(n)
+
+```
+
+Make it long and merge reverse code from codebook and reverse code
+
+```{r}
+pp_long_updated <- pp_wide %>%
+  pivot_longer(
+    cols = -c(SID:HourBlock1, all_beeps),
+    names_to = "trait",
+    values_to = "value"
+  ) %>%
+  rename("New #" = "trait") #for merging codebook; we'll change it back
+
+pp_long_updated <- pp_long_updated %>%
+  left_join(
+    pp_codebook %>%
+      select('New #', Reverse, Facet, Inventory, Trait, 'Modified Item')
+  )
+
+pp_long_updated <- pp_long_updated %>%
+  mutate(value = ifelse(is.na(Reverse), value, 
+         as.numeric(6 - value))) %>% #6 bc only the trait items are reverse coded (max-min - value)
+  select(-Reverse) %>%
+  rename("trait" = "New #") 
+
+```
+
+Create facets
+
+```{r, warning = FALSE}
+#first, subset traits
+pp_long_traits <- pp_long_updated %>%
+  filter(Inventory == "BFI-2") %>%
+  group_by(SID, Date, Facet, Day, Hour, HourBlock, HourBlock1, all_beeps) %>%
+  mutate(facet_value = mean(value, na.rm =TRUE)) %>% #mean score on facet
+  distinct_at(vars(SID, Date, Facet, facet_value)) %>% #keep unique rows
+  mutate_all(~ifelse(is.nan(.), NA, .)) %>%
+  arrange(SID, Date) %>%
+  ungroup()
+
+#subset emotion and diamonds
+pp_long_emo <- pp_long_updated %>%
+  filter(Inventory == "Affect") %>%
+  select(c(SID:all_beeps, value, 'Modified Item')) %>%
+  rename("Facet" = 'Modified Item')
+
+pp_long_sit <- pp_long_updated %>%
+  filter(Inventory == "S8-I") %>%
+  select(c(SID:all_beeps, value, Trait)) %>%
+  rename("Facet" = 'Trait')
+
+#join all three dfs
+pp_long_comp <- full_join(pp_long_traits, pp_long_emo) 
+pp_long_comp <- full_join(pp_long_comp, pp_long_sit) 
+
+#1 column for values
+pp_long_comp$val <- coalesce(pp_long_comp$value, pp_long_comp$facet_value)
+
+#order columns
+pp_long <- pp_long_comp %>%
+  select(SID, Date, Hour, HourBlock, HourBlock1, all_beeps, Facet, facet_value, value, val) %>%
+  arrange(SID, Date)
+```
+
+Make it wide again
+
+```{r}
+pp_wide <- pp_long %>%
+ pivot_wider(
+   id_cols = (SID:all_beeps),
+   names_from = "Facet",
+   values_from = "val"
+    )
+
+gdata::keep(pp_wide, sure = TRUE)
+wd <- getwd()
+setwd(wd)
+
+describe(pp_wide %>% select(-Date))
+```
+
+IMPUTATION TIME BABY
+
+```{r, multiple imputation}
+pp_mi <- data.frame(unclass(pp_wide %>% select(-Date, -Hour, -HourBlock, -HourBlock1)))
+
+pp_mi <- amelia(pp_mi, m = 1, ts = "all_beeps", cs = "SID")$imputations[[1]] %>%
+  as_tibble() %>%
+  full_join(pp_wide %>% select(SID, Date, Hour, HourBlock, HourBlock1, all_beeps)) %>%
+  select(-all_beeps); pp_mi
+
+#delete HourBlock column, will be created in next script.
+pp_mi <- pp_mi %>% select(-HourBlock)
+#remove two NA rows
+pp_mi <- pp_mi[complete.cases(pp_mi), ]
+
+# check ranges after imputation
+describe(pp_mi) # min and max values outside of 1-5 range
+
+# restrict range of state values after MI
+pp <- pp_mi[,2:16]
+pp[ pp > 5 ] <- 5
+pp[ pp < 1] <- 1
+
+sits <- pp_mi[,27:34]
+sits[ sits > 3 ] <- 3
+sits[ sits < 1] <- 1
+
+#recombine
+pp_mi_range <- cbind(pp_mi$SID, pp_mi$Date, pp_mi$Hour, pp_mi$HourBlock1, pp)
+pp_mi_range_sit <- cbind(pp_mi$SID, pp_mi$Date, pp, sits)
+#order columns
+colnames(pp_mi_range_sit)
+pp_mi_range <- pp_mi_range[,c(1:4, 11, 13, 12, 7, 6, 5, 9, 10, 8, 15, 14, 16, 17, 18, 19)]
+pp_mi_range_sit <- pp_mi_range_sit[,c(1, 2, 9, 11, 10, 5, 4, 3, 7, 8, 6, 13, 12, 14, 15, 16, 17, 18:25)]
+
+```
+
+```{r}
+colnames(pp_mi_range) <- c("SID", "Date", "Hour", "HourBlock1", "Sociability", "EnergyLevel", "Assertive", "Trust", "Respect", "Compassion", "Productivity", "Responsibility", "Organization", "Depression", "Anxiety", "EmotionalVol", "IntCuriosity", "AesthSense", "CrtvImagination")
+
+sit_names <- colnames(pp_mi_range_sit[18:25])
+
+
+colnames(pp_mi_range_sit) <- c("SID", "Date", "Sociability", "EnergyLevel", "Assertive", "Trust", "Respect", "Compassion", "Productivity", "Responsibility", "Organization", "Depression", "Anxiety", "EmotionalVol", "IntCuriosity", "AesthSense", "CrtvImagination", sit_names)
+
+
+
+pp_wide <- pp_mi_range
+pp_wide_sit <- pp_mi_range_sit
+rm(pp, pp_mi, pp_mi_range)
+
+describe(pp_wide) 
+describe(pp_wide_sit)
+```
+
+```{r, POMP}
+pomp <- function(x, na){
+  (x - min(x, na.rm = na))/(max(x, na.rm = na) - min(x, na.rm = na))*100
+} 
+
+pp_wide <- pp_wide %>%
+  mutate(
+    Sociability = pomp(Sociability, TRUE)
+    , EnergyLevel =  pomp(EnergyLevel, TRUE)
+    , Assertive =  pomp(Assertive, TRUE)
+    , Trust =  pomp(Trust, TRUE)
+    , Respect =  pomp(Respect, TRUE)
+    , Compassion =  pomp(Compassion, TRUE)
+    , Productivity =  pomp(Productivity, TRUE)
+    , Responsibility =  pomp(Responsibility, TRUE)
+    , Organization =  pomp(Organization, TRUE)
+    , Depression =  pomp(Depression, TRUE)
+    , Anxiety =  pomp(Anxiety, TRUE)
+    , EmotionalVol =  pomp(EmotionalVol, TRUE)
+    , IntCuriosity =  pomp(IntCuriosity, TRUE)
+    , AesthSense =  pomp(AesthSense, TRUE)
+    , CrtvImagination =  pomp(CrtvImagination, TRUE)
+  ) %>% 
+  ungroup()
+
+# pp_wide[,5:19] <- round(pp_wide[,5:19], 2)
+
+```
+
+POMP situations df
+
+```{r}
+pp_wide_sit <- pp_wide_sit %>%
+  mutate(
+    Sociability = pomp(Sociability, TRUE)
+    , EnergyLevel =  pomp(EnergyLevel, TRUE)
+    , Assertive =  pomp(Assertive, TRUE)
+    , Trust =  pomp(Trust, TRUE)
+    , Respect =  pomp(Respect, TRUE)
+    , Compassion =  pomp(Compassion, TRUE)
+    , Productivity =  pomp(Productivity, TRUE)
+    , Responsibility =  pomp(Responsibility, TRUE)
+    , Organization =  pomp(Organization, TRUE)
+    , Depression =  pomp(Depression, TRUE)
+    , Anxiety =  pomp(Anxiety, TRUE)
+    , EmotionalVol =  pomp(EmotionalVol, TRUE)
+    , IntCuriosity =  pomp(IntCuriosity, TRUE)
+    , AesthSense =  pomp(AesthSense, TRUE)
+    , CrtvImagination =  pomp(CrtvImagination, TRUE)
+  ) %>% 
+  ungroup()
+
+# pp_wide_sit[,3:17] <- round(pp_wide_sit[,3:17], 2)
+```
+
+```{r, check}
+# No NAs/NANs/Infs
+sum(is.na(pp_wide)) #0
+sum(apply(pp_wide,2,is.nan)) #0
+sum(apply(pp_wide,2,is.infinite)) #0
+sum(pp_wide < 0) #0
+```
+
+LOOK AT VARIABLE VARIANCES
+
+Descriptives
+
+```{r, warning = FALSE}
+#make it long
+pp_long <- pp_wide %>%
+  pivot_longer(
+    cols = Sociability:CrtvImagination
+    , names_to = c("facet")
+    , values_to = "value"
+  ) %>%
+  arrange(SID, Date)
+
+# function for mean, sd, median, min, max, n, n missing
+descriptive_fun <- function(df, var) {
+  df %>%
+  summarize(
+      mean = mean({{ var }},   na.rm = TRUE),
+      sd     = sd({{ var }},     na.rm = TRUE),
+      median = median({{ var }}, na.rm = TRUE),
+      min    = min({{ var }},    na.rm = TRUE),
+      max    = max({{ var }},    na.rm = TRUE),
+      mode = DescTools::Mode({{ var }},    na.rm = TRUE),
+      # omega  = omega({{var}}),
+      # alpha  = alpha({{var}}),
+      n      = n(),
+      .groups = "drop"
+      )
+}
+
+pp_descriptives <- pp_long %>%
+  group_by(SID, facet) %>% # we want descriptive for each trait for each participant
+  descriptive_fun(var = value) %>% 
+  ungroup()
+
+```
+
+Look at no variance participant-variables
+
+```{r}
+pp_no_var <- pp_descriptives %>%
+  filter(sd == 0)  #fuck
+pp_no_var
+
+#cut em
+'%nin%' <- function(x,y)!('%in%'(x,y))
+pp_wide <- pp_wide %>%
+  filter(SID %nin% pp_no_var$SID)
+
+pp_wide_sit <- pp_wide_sit %>%
+  filter(SID %nin% pp_no_var$SID)
+```
+
+Look at low variance participant-variables
+
+```{r}
+pp_descriptives %>%
+  filter(sd < 10) 
+```
+
+Look at median = 0 or 100
+
+```{r}
+pp_descriptives %>%
+  filter(median == 0 | median == 100)
+# alot of median = 0. or 100 but chill variance
+```
+
+Add hour and hourlbock 1 columns to sit df
+
+```{r}
+pp_wide_sit$Hour <- pp_wide$Hour
+pp_wide_sit$HourBlock1 <- pp_wide$HourBlock1
+pp_wide_sit <- pp_wide_sit %>%
+  select(SID, Date, Hour, HourBlock1, everything())
+```
+
+```{r}
+#make names across sample consistent. and i want the situation variables, and i want study v
+pp_wide <- pp_wide_sit %>%
+  mutate(study = "PPS")
+
+table(is.na(pp_wide))
+
+
+#post ids for demographics
+pp_ids_post <- unique(pp_wide$SID)
+
+save(pp_ids_post, file = "Data/pp_ids_post.RData")
+```
+
+```{r, save}
+save(pp_wide, file = "Data/pp_wide.RData")
+save(pp_no_var, file = "Data/pp_no_var.RData")
+```

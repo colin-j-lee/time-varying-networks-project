@@ -1,0 +1,145 @@
+---
+title: "5_2. Contemporaneous Time Varying Networks AND RuleReg"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, echo = FALSE}
+library(mgm)
+library(psych)
+library(lavaan)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/pp_data.RData", wd))
+# load(sprintf("%s/Data/pers_tvmgm.RData", wd)) #this script
+
+```
+
+##Bandwidth Selection
+
+```{r, eval=FALSE}
+bwSeq <- seq(0.01, 2, length =20)
+
+bw_select_fnc_timeout <- function(x){
+  tryCatch(
+    callr::r (mgm::bwSelect,
+              args = list(data = x %>%
+                            select(Sociability:CrtvImagination) %>%
+                            as.matrix(),
+                          type = rep("g", 15), #gaussian
+                          level = rep(1, 15), #continuous
+                          bwSeq = bwSeq, #bandwidths to try
+                          bwFolds = 1, #single split (half training half test)
+                          bwFoldsize = 10,
+                          modeltype = 'mgm', 
+                          k = 2, 
+                          threshold = 'HW', 
+                          ruleReg = 'AND', #sparser network
+                          timepoints = x$time_norm,
+                          pbar = TRUE),
+              timeout = 300,
+              package = T),
+    error = function (e) e
+  )
+}
+
+```
+
+Do it
+
+```{r, warning = FALSE, eval = FALSE}
+plan(multisession, workers = 8)
+
+pp_mgm_bw <- future_map(pp_data$data,
+                            function(x) bw_select_fnc_timeout(x),
+                            .progress=TRUE)
+
+```
+
+Add column of bandwidth that minimizes mean error
+
+```{r, eval = FALSE}
+pp_mgm_AND <- pp_data %>%
+  mutate(bandwidth = map(pp_mgm_bw, function(x) bwSeq[which.min(x$meanError)]))
+
+#turn wonky ass list into a vector
+is.na(pp_mgm_AND$bandwidth) <- lengths(pp_mgm_AND$bandwidth) == 0
+pp_mgm_AND$bandwidth <- unlist(pp_mgm_AND$bandwidth)
+```
+
+Subset (no NA bandwidths)
+
+```{r, eval = FALSE}
+pp_mgm_AND <- pp_mgm_AND %>%
+ filter(!is.na(bandwidth))
+rm(pp_data)
+```
+
+Estimate TV-MGM Model using bandwidth that minimizes Mean absolute error.
+
+```{r, eval = FALSE}
+pers_tvmgm_function <- function(x, bandwidth){
+  tvmgm(data = x %>%
+           select(Sociability:CrtvImagination) %>%
+           as.matrix(),
+        type = rep("g", 15),
+        level = rep(1, 15), 
+        lambdaSel = "CV",
+        timepoints = x$time_norm, 
+        estpoints = seq(0, 1, length = 10), 
+        bandwidth = bandwidth,
+        threshold = "HW",
+        ruleReg = "AND")
+}
+
+```
+
+Function on no NA tibble
+
+```{r, eval = FALSE, warning=FALSE, echo = FALSE}
+plan(multisession, workers = 8)
+
+pp_data_mgm <- pp_data_mgm %>%
+  mutate(tvmgm = future_map2(.x = pp_data_mgm$data, .y = pp_data_mgm$bandwidth,
+                          pers_tvmgm_function,
+                          .progress=TRUE))
+save(pp_data_mgm, file = "Data/pp_data_mgm.RData")
+```
+
+##Predictions
+
+```{r, eval = FALSE}
+x <- pp_data_mgm$data
+pers_mat <- list()
+for(i in 1:length(x)){
+  pers_mat[[i]] <- x[[i]][2:16] %>%
+    as.matrix()
+}
+
+x <- pp_data_mgm$tvmgm
+tvmgm_mods <- list()
+for(i in 1:length(x)){
+  tvmgm_mods[[i]] <- x[[i]]
+}
+
+pp_data_mgm <- pp_data_mgm %>%
+  mutate(preds = map2(.x = tvmgm_mods, .y = pers_mat, 
+                      function(x,y) predict(object = x, 
+                                            data = y,
+                                            errorCon = c("R2", "RMSE"),
+                                            tvMethod = "weighted"))
+         )
+
+save(pp_data_mgm, file = "Data/pp_data_mgm.RData")
+pp_data_mgm$preds
+```

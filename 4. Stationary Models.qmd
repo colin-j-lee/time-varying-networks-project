@@ -1,0 +1,183 @@
+---
+title: "4. Stationary Models"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(qgraph)
+library(mgm)
+library(plyr)
+library(psych)
+library(lavaan)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/tvn_wide.RData", wd))
+load(sprintf("%s/Data/tvn_data.RData", wd))
+
+tvn_wide <- tvn_wide %>%
+  arrange(SID)
+
+tvn_data <- tvn_data %>%
+  arrange(SID)
+```
+
+Stationary fits
+
+Contemporaneous Function
+
+```{r}
+mgm_fnc <- function(data){
+  mgm(data = data,
+      type = rep("g", 15),
+      levels = rep(1, 15),
+      k = 2, #pairwise mgm
+      lambaSel = "CV",
+      lambdaFolds = 10,
+      ruleReg = "AND",
+      threshold = "HW"
+      )
+}
+
+```
+
+Lagged Function
+
+```{r}
+mvar_fnc <- function(data){
+  mvar(data = data,
+      type = rep("g", 15),
+      levels = rep(1, 15),
+      k = 2, #pairwise mgm
+      lambaSel = "CV",
+      lambdaFolds = 10,
+      lags = 1,
+      threshold = "HW"
+      )
+}
+```
+
+prep; df -\> matrix
+
+```{r}
+tvn_wide_stat_list <- tvn_wide %>%
+  select(Sociability:CrtvImagination) %>%
+  split(f = tvn_wide$SID) 
+
+tvn_wide_stat_list <- lapply(tvn_wide_stat_list, as.matrix)
+```
+
+map being a mf so had to use apply
+
+```{r}
+#contemporaneous
+stationary_con_models <- lapply(tvn_wide_stat_list, mgm_fnc)
+
+#lagged
+stationary_lag_models <- lapply(tvn_wide_stat_list, mvar_fnc)
+
+```
+
+Predictions
+
+```{r}
+stat_pred_fnc <- function(fit, data){
+  predict(object = fit, 
+          data = data, 
+          errorCon = c("R2", "RMSE"))
+}
+
+```
+
+have to for loop cause map doesnt work with predict for some reason
+
+```{r}
+for(i in 1:length(tvn_wide_stat_list)){
+  stationary_lag_models[[i]][["predictions"]] <- predict(object = stationary_lag_models[[i]], 
+                                                        data = tvn_wide_stat_list[[i]], 
+                                                        errorCon = c("R2", "RMSE"))
+}
+
+for(i in 1:length(tvn_wide_stat_list)){
+  stationary_con_models[[i]][["predictions"]] <- predict(object = stationary_con_models[[i]], 
+                                                        data = tvn_wide_stat_list[[i]], 
+                                                        errorCon = c("R2", "RMSE"))
+}
+
+stationary_models <- tibble(
+  SID = tvn_data$SID,
+  lag_models = stationary_lag_models,
+  con_models = stationary_con_models,
+  data = tvn_data$data
+)
+
+
+save(stationary_models, file = "Data/stationary_models.RData")
+```
+
+Test vis exemplar
+
+```{r}
+test <- stationary_test %>% filter(SID == 31624)
+test <- test$con_models[["31624"]]
+
+par_ests <-  test[["pairwise"]][["wadj"]]
+
+ind_negative <- which(test[["pairwise"]][["signs"]] == -1)
+
+par_ests[ind_negative] <- par_ests[ind_negative]*-1
+
+
+
+qgraph::qgraph(par_ests,
+               edge_color <- ifelse(t(par_ests) > 0, "#0072B2", "#D55E00"),
+               layout = "circle",
+               edge.color = edge_color
+)
+```
+
+Exemplar absurd
+
+```{r}
+tvn_ex <- tvn_data %>% filter(SID == 31624)
+
+absurd_mgm <- mgm(data = tvn_ex$data[[1]] %>%
+           select(Sociability:CrtvImagination) %>%
+             as.matrix(),
+      type = rep("g", 15),
+      levels = rep(1, 15),
+      k = 2, #pairwise mgm
+      lambaSel = "CV",
+      lambdaFolds = 10,
+      ruleReg = "AND", #requires at least one estimate between two nodes to be nonzero in order to set the edge to be present
+      threshold = "HW"
+      )
+
+
+
+par_ests <-  absurd_mgm[["pairwise"]][["wadj"]]
+
+ind_negative <- which(absurd_mgm[["pairwise"]][["signs"]] == -1)
+
+par_ests[ind_negative] <- par_ests[ind_negative]*-1
+
+
+
+qgraph::qgraph(par_ests,
+               edge_color <- ifelse(t(par_ests) > 0, "#0072B2", "#D55E00"),
+               layout = "circle",
+               edge.color = edge_color
+)
+```
+
+Beautiful :,)

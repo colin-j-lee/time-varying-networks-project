@@ -1,0 +1,520 @@
+---
+title: "1_3. Descriptives"
+author: "Colin J Lee"
+format: 
+  html:
+    code-tools: true
+    code-copy: true
+    code-line-numbers: true
+    code-link: true
+    theme: united
+    highlight-style: tango 
+    df-print: paged
+    code-fold: show
+    toc: true
+    toc-float: true
+    self-contained: true
+---
+
+
+```{r, include=FALSE}
+library(plyr)
+library(lavaan)
+library(MVN)
+library(psych)
+library(multilevelTools)
+library(furrr)
+library(kableExtra)
+library(scales)
+library(tidyverse)
+
+wd <- getwd()
+setwd(wd)
+set.seed(420)
+
+
+#load prepped data
+load(sprintf("%s/Data/tvn_wide.RData", wd)) #wide
+load(sprintf("%s/Data/tvn_data.RData", wd)) #nested
+load(sprintf("%s/Data/tvn_baseline_variables.RData", wd)) #baseline vars
+
+#combine esm and baseline 
+tvn_wide_base <- tvn_wide %>%
+  left_join(tvn_baseline_variables) 
+
+#count number of surveys, average, and range per study
+tvn_data %>%
+  group_by(study) %>%
+  summarize(total = sum(obs), avg = mean(obs), max = max(obs), min = min(obs))
+
+```
+
+Function to make a df long and separate by studies
+```{r}
+study_fun <- function(df){
+  df <- df %>%
+  arrange(study) %>%
+  pivot_longer(cols = -study, names_to = "variable", values_to = "value") %>%
+  mutate(variable = factor(variable, levels = unique(variable)),#preserve order
+         study = factor(study, levels = c("IPCS", "PPS_CPE", "Soc-Cog"))) %>% 
+  group_by(study, variable) %>%
+  summarise(
+    mean = na_if(mean(value, na.rm = TRUE), NaN),#convert NaN to NA for cog DIAMONDS
+    sd = na_if(sd(value, na.rm = TRUE), NaN),
+    median = na_if(median(value, na.rm = TRUE), NaN),
+    .groups = "drop"
+  ) %>%
+  mutate(mean = round(mean,2),
+         sd = round(sd,2),
+         median = round(median,0),
+         median = as.character(median),
+         mean = paste0(mean, " (", sd,")"),
+         across(where(is.character), ~ if_else(. == "NA (NA)", "-", .)),
+         across(everything(), ~ if_else(is.na(.), "-", as.character(.)))
+) %>%
+  rename(Mean = mean, #change back to mean (sd) after
+         Median = median,
+         Variables = variable) %>%
+  select(-sd) %>%
+    ungroup()
+  
+  return(df)
+}
+
+```
+
+First, sample level ESM descriptives 
+
+```{r}
+esm_summary <- tvn_wide %>%
+  select(-c(SID, Date:time_norm)) %>%
+  study_fun() %>%
+  pivot_wider(
+    names_from  = study,
+    values_from = c(Mean, Median)
+  ) %>%
+  # Reorder columns in the desired sequence:
+  select(
+    Variables,
+    Mean_IPCS,   Median_IPCS,
+    Mean_PPS_CPE, Median_PPS_CPE,
+    'Mean_Soc-Cog', 'Median_Soc-Cog'
+  ) 
+
+bfi_names <- c(
+  "Sociability", 
+  "Energy Level", 
+  "Assertive", 
+  "Trust", 
+  "Respect", 
+  "Compassion", 
+  "Productivity", 
+  "Responsibility", 
+  "Organization", 
+  "Depression", 
+  "Anxiety", 
+  "Emotional Volatility", 
+  "Intellectual Curiosity", 
+  "Aesthetic Sensitivity", 
+  "Creative Imagination"
+)
+
+esm_summary$Variables[1:15] <- bfi_names
+
+#kable it
+kable(
+  esm_summary,
+  escape = F,
+  "html",
+  caption = "<strong>Table 2</strong><br><em>Descriptive Statistics of ESM Measures For Each Study</em>",
+  col.names = c(
+    "",
+    "Mean (SD)", "Median",
+    "Mean (SD)", "Median",
+    "Mean (SD)", "Median"
+  ),
+  align = c("r","c","c","c","c","c","c")
+) %>%
+  pack_rows("BFI-2 Facets",1, 15, hline_after = FALSE) %>% #hline doesnt work
+  pack_rows("DIAMONDS", 16, 23) %>%
+  # 4. Add the top headers for the three studies
+  add_header_above(c(
+    " " = 1,       # 1 column for "Variables"
+    "IPCS" = 2,    # Next 2 columns for IPCS
+    "PPS + CPE" = 2, # Next 2 columns for PPS_CPE
+    "Soc-Cog" = 2  # Next 2 columns for SOC-COG
+  ))  %>%
+  kable_classic(full_width = FALSE, 
+                          html_font = "Times") %>%
+  save_kable(file = "Manuscript Tables and Figures/ESM Descriptives For Each Study.html")
+
+```
+
+
+HEATMAP of facets
+```{r}
+corr_nested <- tvn_wide_base %>%
+    select(study, Sociability:CrtvImagination) %>%
+  nest(.by = study) %>%
+  mutate(corr_mat = map(data, ~cor(., use = "pairwise"))) %>%
+  mutate(study = ifelse(study == "PPS_CPE", "PPS + CPE", study)) %>%
+  arrange(study)
+
+# Named vector to map short names to full names
+facet_labels <- c(
+  Sociability = "Sociability",
+  EnergyLevel = "Energy Level",
+  Assertive = "Assertive",
+  Trust = "Trust",
+  Respect = "Respect",
+  Compassion = "Compassion",
+  Productivity = "Productivity",
+  Responsibility = "Responsibility",
+  Organization = "Organization",
+  Depression = "Depression",
+  Anxiety = "Anxiety",
+  EmotionalVol = "Emotional Volatility",
+  IntCuriosity = "Intellectual Curiosity",
+  AesthSense = "Aesthetic Sensitivity",
+  CrtvImagination = "Creative Imagination"
+)
+
+
+#reshape so its long
+r_reshape_fun <- function(r){
+  coln <- colnames(r)
+  r[lower.tri(r, diag = TRUE)] <- NA 
+  long_r <- r %>%
+    as.data.frame() %>%
+    rownames_to_column("V1") %>%
+    pivot_longer(
+      cols = -V1,
+      names_to = "V2",
+      values_to = "r"
+    )
+  
+  # Apply full labels using named vector
+  long_r <- long_r %>%
+    mutate(
+      V1 = factor(facet_labels[as.character(V1)], levels = facet_labels),
+      V2 = factor(facet_labels[as.character(V2)], levels = rev(facet_labels))
+    )
+  
+  return(long_r)
+}
+
+corr_nested <- corr_nested  %>%
+  mutate(corr_mat = map(corr_mat, r_reshape_fun)) 
+
+corr_stacked_plots <- corr_nested %>%
+  select(-data) %>%
+  unnest(cols = corr_mat) %>%
+  ggplot(aes(x = V1, y = V2, fill = r))+
+  geom_raster() + 
+  geom_text(aes(label = round(r, 2)), size = 3) + 
+  scale_fill_gradient2(limits = c(-1,1)
+    , breaks = c(-1, -.5, 0, .5, 1)
+    , low = ggpubfigs::friendly_pal("ito_seven")[1], high = ggpubfigs::friendly_pal("ito_seven")[2]
+    , mid = "white", na.value = "white") + 
+  labs(
+    x = NULL
+    , y = NULL
+    , fill = NULL
+    , title = "Zero-Order Correlations of Momentary BFI-2 Facets For Each Study"
+    ) + 
+  facet_wrap(~ study, ncol = 1) +
+  theme_classic() + 
+  theme(
+    legend.position = "bottom"
+    , axis.text = element_text(face = "bold")
+    , axis.text.x = element_text(angle = 45, hjust = 1, size = 7.5)
+    , axis.text.y = element_text(size = 7.5)
+    , plot.title = element_text(face = "bold", hjust = .85)
+    , plot.title.position = "plot"
+    , panel.background = element_rect(color = "black", size = 1)
+    , strip.background = element_blank()  # Removes the border around facet labels
+    , strip.text = element_text(size = 10, face = "bold")
+  )
+
+ggsave(corr_stacked_plots, filename = "Manuscript Tables and Figures/Facet Heat Maps.png",
+       width = 7, height = 12)
+```
+
+Multilevel Reliability
+For each trait (3 facets) run an ml rel
+
+```{r}
+tvn_facets <- tvn_wide_base %>% select(SID, study, Sociability:CrtvImagination)
+
+tvn_facets_ipcs <- tvn_facets %>% filter(study == "IPCS") %>% select(-study)
+  
+tvn_facets_pps <- tvn_facets %>% filter(study == "PPS_CPE") %>% select(-study)
+
+tvn_facets_cog <- tvn_facets %>% filter(study == "Soc-Cog") %>% select(-study)
+
+# ml_rel_fun <- function(d, item_names){
+#   multilevelTools::omegaSEM(data = tvn_facets,
+#                    id = "SID",
+#                    items = item_names,
+#                    savemodel = TRUE)
+# }
+# #item names
+E_names <- colnames(tvn_facets)[3:5]
+A_names <- colnames(tvn_facets)[6:8]
+C_names <- colnames(tvn_facets)[9:11]
+N_names <- colnames(tvn_facets)[12:14]
+O_names <- colnames(tvn_facets)[15:17]
+
+```
+im so sorry emorie
+```{r}
+ml_rel_e_ipcs <- multilevelTools::omegaSEM(data = tvn_facets_ipcs,
+                   id = "SID",
+                   items = E_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_a_ipcs <- multilevelTools::omegaSEM(data = tvn_facets_ipcs,
+                   id = "SID",
+                   items = A_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_c_ipcs <- multilevelTools::omegaSEM(data = tvn_facets_ipcs,
+                   id = "SID",
+                   items = C_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_n_ipcs <- multilevelTools::omegaSEM(data = tvn_facets_ipcs,
+                   id = "SID",
+                   items = N_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_o_ipcs <- multilevelTools::omegaSEM(data = tvn_facets_ipcs,
+                   id = "SID",
+                   items = O_names,
+                   savemodel = TRUE
+                   )
+
+#ppscpe
+ml_rel_e_pps <- multilevelTools::omegaSEM(data = tvn_facets_pps,
+                   id = "SID",
+                   items = E_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_a_pps <- multilevelTools::omegaSEM(data = tvn_facets_pps,
+                   id = "SID",
+                   items = A_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_c_pps <- multilevelTools::omegaSEM(data = tvn_facets_pps,
+                   id = "SID",
+                   items = C_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_n_pps <- multilevelTools::omegaSEM(data = tvn_facets_pps,
+                   id = "SID",
+                   items = N_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_o_pps <- multilevelTools::omegaSEM(data = tvn_facets_pps,
+                   id = "SID",
+                   items = O_names,
+                   savemodel = TRUE
+                   )
+
+#cog
+ml_rel_e_cog <- multilevelTools::omegaSEM(data = tvn_facets_cog,
+                   id = "SID",
+                   items = E_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_a_cog <- multilevelTools::omegaSEM(data = tvn_facets_cog,
+                   id = "SID",
+                   items = A_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_c_cog <- multilevelTools::omegaSEM(data = tvn_facets_cog,
+                   id = "SID",
+                   items = C_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_n_cog <- multilevelTools::omegaSEM(data = tvn_facets_cog,
+                   id = "SID",
+                   items = N_names,
+                   savemodel = TRUE
+                   )
+
+ml_rel_o_cog <- multilevelTools::omegaSEM(data = tvn_facets_cog,
+                   id = "SID",
+                   items = O_names,
+                   savemodel = TRUE
+                   )
+```
+
+aggregate into a table
+
+```{r}
+ml_rel_e_df_ipcs <- ml_rel_e_ipcs$Results %>%
+  mutate(trait = rep("Extraversion",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_a_df_ipcs <- ml_rel_a_ipcs$Results %>%
+  mutate(trait = rep("Agreeableness",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_c_df_ipcs <- ml_rel_c_ipcs$Results %>%
+  mutate(trait = rep("Conscientiousness",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_n_df_ipcs <- ml_rel_n_ipcs$Results %>%
+  mutate(trait = rep("Neuroticism",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_o_df_ipcs <- ml_rel_o_ipcs$Results %>%
+  mutate(trait = rep("Openness",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_df_ipcs <- rbind(ml_rel_e_df_ipcs, ml_rel_a_df_ipcs, ml_rel_c_df_ipcs, ml_rel_n_df_ipcs, ml_rel_o_df_ipcs) %>%
+  rename(Trait = trait)
+colnames(ml_rel_df_ipcs)[2] <- "Within-person <br> (Range)"
+colnames(ml_rel_df_ipcs)[3] <- "Between-person <br> (Range)"
+
+
+#ppcpe
+ml_rel_e_df_pps <- ml_rel_e_pps$Results %>%
+  mutate(trait = rep("Extraversion",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_a_df_pps <- ml_rel_a_pps$Results %>%
+  mutate(trait = rep("Agreeableness",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_c_df_pps <- ml_rel_c_pps$Results %>%
+  mutate(trait = rep("Conscientiousness",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_n_df_pps <- ml_rel_n_pps$Results %>%
+  mutate(trait = rep("Neuroticism",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_o_df_pps <- ml_rel_o_pps$Results %>%
+  mutate(trait = rep("Openness",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_df_pps <- rbind(ml_rel_e_df_pps, ml_rel_a_df_pps, ml_rel_c_df_pps, ml_rel_n_df_pps, ml_rel_o_df_pps) %>%
+  rename(Trait = trait)
+colnames(ml_rel_df_pps)[2] <- "Within-person <br> (Range)"
+colnames(ml_rel_df_pps)[3] <- "Between-person <br> (Range)"
+
+
+#cog
+ml_rel_e_df_cog <- ml_rel_e_cog$Results %>%
+  mutate(trait = rep("Extraversion",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_a_df_cog <- ml_rel_a_cog$Results %>%
+  mutate(trait = rep("Agreeableness",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_c_df_cog <- ml_rel_c_cog$Results %>%
+  mutate(trait = rep("Conscientiousness",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_n_df_cog <- ml_rel_n_cog$Results %>%
+  mutate(trait = rep("Neuroticism",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_o_df_cog <- ml_rel_o_cog$Results %>%
+  mutate(trait = rep("Openness",2),
+         level = c("Within-person", "Between-person"),
+         estimate = sprintf("%2.2f [%2.2f, %2.2f]", est, ci.lower, ci.upper)) %>%
+  select(trait, estimate, level) %>%
+  pivot_wider(names_from = level,
+              values_from = estimate)
+
+ml_rel_df_cog <- rbind(ml_rel_e_df_cog, ml_rel_a_df_cog, ml_rel_c_df_cog, ml_rel_n_df_cog, ml_rel_o_df_cog) %>%
+  rename(Trait = trait)
+colnames(ml_rel_df_cog)[2] <- "Within-person <br> (Range)"
+colnames(ml_rel_df_cog)[3] <- "Between-person <br> (Range)"
+
+#comb
+ml_pain <- bind_rows(ml_rel_df_ipcs,
+                     ml_rel_df_pps,
+                     ml_rel_df_cog)
+
+kable(ml_pain, format = "html",
+      escape = F, align = c("r", "c", "c"),
+        caption = "<strong> Table 3 </strong><br><em>Multilevel Omega Reliabilities of Momentary BFI-2 Traits For Each Study</em>") %>%
+    kable_classic(full_width = F, html_font = "Times") %>%
+  pack_rows("IPCS",1, 5) %>%
+  pack_rows("PPS + CPE", 6, 10) %>%
+  pack_rows("Soc-Cog", 11, 15) %>%
+  save_kable(file = "Manuscript Tables and Figures/Multilevel Reliabilities For Each Study.html")
+
+```

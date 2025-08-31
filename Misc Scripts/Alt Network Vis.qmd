@@ -1,0 +1,773 @@
+---
+title: "6_1. TV Var Vis"
+format: html
+editor: visual
+---
+
+```{r, include = FALSE}
+library(qgraph)
+library(mgm)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+```{r}
+load(sprintf("%s/Data/tvn_tvvar_pred.RData", wd)) 
+
+tvn_tvvar_pred <- tvn_tvvar_pred %>%
+  arrange(SID)
+```
+
+```{r}
+# ----- Preprocessing  ------
+# Compute mean model over time to create decent layout
+mean_wadj <- list()
+for(i in 1:nrow(tvn_tvvar_pred)){
+  mean_wadj[[i]] <- apply(tvn_tvvar_pred$tvvar[[i]][["wadj"]][, , 1, ], 1:2, mean)
+}
+
+#negative signs are stored separately so apply them to the relevant parameter estimates
+par_ests <- list()
+for(i in 1:nrow(tvn_tvvar_pred)){
+  par_ests[[i]] <- (tvn_tvvar_pred$tvvar[[i]][["wadj"]])
+  }
+
+ind_negative <- list()
+for(i in 1:nrow(tvn_tvvar_pred)){
+  ind_negative[[i]] <- which(tvn_tvvar_pred$tvvar[[i]][["signs"]] == -1, arr.ind = T)
+  }
+
+for(i in 1:nrow(tvn_tvvar_pred)){
+  par_ests[[i]][ind_negative[[i]]] <- par_ests[[i]][ind_negative[[i]]]*-1
+}
+
+for(i in 1:nrow(tvn_tvvar_pred)){
+  par_ests[[i]][tvn_tvvar_pred$tvvar[[i]][["edgecolor"]]=="red"] <- par_ests[[i]][tvn_tvvar_pred$tvvar[[i]][["edgecolor"]]=="red"] * -1
+}
+```
+
+# ----- Plotting ------
+
+```{r}
+# Get layout of mean graph
+Q_shit <- list()
+for(i in 1:length(mean_wadj)){
+  Q_shit[[i]] <- qgraph(t(mean_wadj[[i]]), layout="spring", DoNotPlot=T, repulsion=.6)
+}
+
+# Plot graph at selected fixed time points
+tpSelect <- 1:5
+
+#group by trait
+traitgroups <- list("Extraversion" = c(1:3), #columns in df
+                    "Agreeableness" = c(4:6),
+                    "Conscientiousness" = c(7:9),
+                    "Neuroticism" = c(10:12),
+                    "Openness" = c(13:15)
+                    )
+
+#default plotting settings
+theme_set(theme_bw(base_size = 14, base_family="Times") )
+theme_update(legend.position="bottom", 
+             panel.spacing=grid::unit(0,"lines"),
+             strip.background=element_rect(color="black",fill="white"),
+             panel.grid=element_blank())
+```
+
+```{r}
+tvn_plot_fnc <- function(tpSelect, par_ests, Q_shit, traitgroups, 
+                         tvvar, preds, SID, bw) {
+  plots <- list()  # List to store qgraph plots
+  
+  for (tp in tpSelect) {
+    plots[[as.character(tp)]] <- qgraph(t(par_ests[, , 1, tp]),  
+                                        layout = Q_shit$layout,  
+                                        groups = traitgroups, 
+                                        legend = FALSE,
+                                        palette = 'colorblind',
+                                        width = 15 * 1.4, height = 16,
+                                        border.width = 0.5, label.cex = 0.7, 
+                                        label.color = 'black', label.prop = 0.9, 
+                                        negDashed = TRUE, loop = 0.7,
+                                        edge.color = t(tvvar[["edgecolor"]][, , 1, tp]),  
+                                        labels = c("Sociability", "Energy Level", "Assertive",
+                                                   "Trust", "Respect", "Compassion", "Productivity",
+                                                   "Responsibility", "Organization", "Depression", "Anxiety",
+                                                   "Emo Volatility", "Int Curiosity", "Aesth Sense", "Crtv Imagination"), 
+                                        minimum = 0, maximum = .5, title.cex=1, 
+                                        border.color = "grey60", edge.color = "grey60", 
+                                        trans=1, fade=FALSE,
+                                        vTrans = 190, details = FALSE, shape = "ellipse", 
+                                        node.width=1, node.height=.6, vsize = 13, 
+                                        asize = 4, edge.width=.6, label.font=15, 
+                                        label.scale=FALSE,
+                                        pie = preds[["tverrors"]][[tp]][["R2"]],  
+                                        title = "",
+                                        # title=paste("Participant", 
+                                        #             unique(as.character(SID)), "TVN",
+                                        #             "Estimation Point", 
+                                        #             as.character(tp), "\nBandwidth =", 
+                                        #             round(bw,3)),
+                                        layoutOffset=c(0,0), GLratio=3.5, layoutScale=c(.8, .8),
+                                        DoNotPlot = TRUE)  # Store plot
+  }
+  
+  return(plots)
+}
+
+# Create a tibble to store results
+tvvar_plots <- tibble(
+  SID = tvn_tvvar_pred$SID,  
+  lag_networks = lapply(seq_len(nrow(tvn_tvvar_pred)), function(i) {
+    tvn_plot_fnc(tpSelect, par_ests[[i]], Q_shit[[i]], traitgroups, 
+                 tvvar = tvn_tvvar_pred$tvvar[[i]], preds = tvn_tvvar_pred$pred[[i]], 
+                 SID = tvn_tvvar_pred$SID[i],
+                 bw = tvn_tvvar_pred$bandwidth[i])  
+  })
+)
+
+#test to make sure SID and entwork are aligned; checked before removing title
+x <- tvvar_plots %>% filter(SID == 109324)
+plot(x$lag_networks[[1]][["3"]])
+
+save(tvvar_plots, file = "Data/tvvar_plots.RData")
+```
+
+Separate code to save as pdf
+
+```{r}
+tvn_plot_pdf_fnc <- function(tpSelect, par_ests, Q_shit, traitgroups, tvvar, preds, SID, bw){
+  for(tp in tpSelect){
+      qgraph(t(par_ests[[i]][, , 1, tp]), #parameter estimates to graph
+                                  layout = Q_shit[[i]]$layout, #using mean; "spring" has overlapping nodes
+                                  groups = traitgroups, #group traits by color
+                                  palette = 'colorblind',
+                                  width = 15 * 1.4, # width of figure
+                                  height = 16, # height of figure,
+                                  border.width = 0.5,
+                                  label.cex = 0.7, # scalar on label size
+                                  label.color = 'black', # string on label colors
+                                  label.prop = 0.9, 
+                                  negDashed = T, #this aint workin
+                                  loop = 0.7,
+                                  edge.color = t(tvvar[[i]][["edgecolor"]][, , 1, tp]), 
+                                  labels = c("Sociability", "Energy Level", "Assertive",
+                                             "Trust", "Respect", "Compassion",
+                                             "Productivity", "Responsibility", "Organization", 
+                                             "Depression", "Anxiety", "Emo Volatility", 
+                                             "Int Curiosity", "Aesth Sense", "Crtv Imagination"), #variable names
+                                  minimum = 0, #min value for edge to be shown
+                                  maximum = .5, #max to scale edge weights
+                                  title.cex=1, #title size
+                                  border.color = "grey60", edge.color = "grey60", 
+                                  trans=1,fade=F,
+                                  vTrans = 190, # transparency of the nodes to better determine edges crossing node areas
+                                  details = F, shape = "ellipse", node.width=1, node.height=.6, # node appearance
+                                  vsize = 13, #node size 
+                                  asize = 4, #arrow head size
+                                  edge.width=.6,
+                                  label.font=15, 
+                                  label.scale=F,
+                                  pie = preds[[i]][["tverrors"]][[tp]][["R2"]], 
+                                  title=paste(paste0("Participant ", unique(as.character(SID[[i]])), " Lagged Network",
+                                  " Estimation Point ", as.character(tp), "\nBandwidth = ", round(bw[[i]],3))),
+                                  layoutOffset=c(0,0), 
+                                  GLratio=3.5, 
+                                  layoutScale=c(.8, .8))
+      }
+}
+
+```
+
+```{r}
+#warning is for one person who didn't have pred R^2 calculated
+tvn_tvvar_pred_pdf <- tvn_tvvar_pred[-340,]
+
+#pdf
+pdf("Figures/Networks/Lagged Networks.pdf")
+for(i in 1:nrow(tvn_tvvar_pred_pdf)){
+  tvn_plot_pdf_fnc(tpSelect, par_ests, Q_shit, 
+                   traitgroups, tvvar = tvn_tvvar_pred_pdf$tvvar, 
+                   preds = tvn_tvvar_pred_pdf$pred, 
+                   SID = tvn_tvvar_pred_pdf$SID, bw = tvn_tvvar_pred_pdf$bandwidth)
+}
+dev.off()
+```
+
+## SIMRAN GIF CODE
+
+```{r}
+draw_network = function(phi_matrix, timepoint, max_timepoints){
+  timepoint_network = qgraph(phi_matrix,
+                             posCol = "#435F90", negCol = "#8C2B0E",
+                             negDashed = TRUE,
+                             labels = c("Female \nPA", "Female \nNA", "Male \nPA", "Male \nNA"),
+                             label.scale.equal = TRUE,
+                             layout = "circle",
+                             title = paste0("Day ", timepoint, " of ", max_timepoints))
+  
+  return(timepoint_network)
+}
+draw_network_overall = function(dyad_array){
+  # give as input the array containing phi matrices
+  # for a single individual
+  
+  max_timepoints = dim(dyad_array)[3]
+  
+  network_list = lapply(1:max_timepoints, function(x) draw_network(dyad_array[, , x], timepoint = x,
+                                                                   max_timepoints = max_timepoints))
+  
+  return(network_list)
+}
+
+dyad_networks_all = lapply(1:length(dyad_timepointestimates),
+                           function(x) draw_network_overall(dyad_timepointestimates[[x]]))
+
+# Save GIFs for all dyads
+
+for(i in 1:length(dyad_networks_all)){
+  
+  max_timepoints = length(dyad_networks_all[[i]])
+  
+  saveGIF(for(j in 1:max_timepoints){qgraph(dyad_networks_all[[i]][[j]])},
+          interval = 0.25,
+          movie.name = paste0("/Users/simranjohal/Desktop/School/Graduate School/Year 4/PSC 290 - Data Visualization/Final Project/Dyad GIFs/Dyad", i, "_NetworkGIF.gif"),
+          ani.width = 500, ani.height = 500)
+  
+  print(i)
+  
+}
+
+```
+
+```{r}
+
+x$graphAttributes$Edges$lty[plot$Edgelist$weight < 0] <- 2
+x$graphAttributes$Edges$color <- ifelse(abs(x$Edgelist$weight) <.1, edge_colors[1],
+                                           ifelse(abs(x$Edgelist$weight) <.2, edge_colors[2],
+                                                  edge_colors[3]))
+qgraph(x)
+```
+
+```{r}
+edge_colors <- RColorBrewer::brewer.pal(8, "Purples")[c(3,5,7)]
+plot_fun <- function(data, SID, dataset){
+  # nvar <- dim(data_mod)[2]
+  groups <- list(
+    lifesat = which(rownames(data) == "lifesat")
+    , other = seq(1:nrow(data))[-which(rownames(data) == "lifesat")]
+  ) #ok let's try and group by traits
+  plot <- qgraph(data
+                 , layout = "spring"
+                 , title = sprintf("%s: %s for S%s", dataset, type, SID)
+                 , loop = .7
+                 , node.width = 1.4
+                 , edge.width = 1
+                 , label.font = 2
+                 , label.fill.vertical = 1
+                 , label.fill.horizontal = 1
+                 , edge.color = "black"
+                 , groups = groups
+                 , color = c(RColorBrewer::brewer.pal(3, "Set3")[1], "white")
+                 , legend = F
+                 , DoNotPlot = TRUE
+                 , mar = c(4,4,4,4)
+                 , asize = 6
+                 , border.width = 2.5
+  )
+  plot$graphAttributes$Edges$lty[plot$Edgelist$weight < 0] <- 2
+  plot$graphAttributes$Edges$color <-
+    ifelse(abs(plot$Edgelist$weight) <.1, edge_colors[1],
+           ifelse(abs(plot$Edgelist$weight) <.2, edge_colors[2], edge_colors[3]))
+  return(plot)
+}
+```
+
+
+# con
+
+```{r}
+load(sprintf("%s/Data/tvn_contemp_pred.RData", wd)) 
+
+tvn_contemp_pred <- tvn_contemp_pred %>%
+  arrange(SID)
+```
+
+```{r}
+# ----- Preprocessing  ------
+# Compute mean model over time to create decent layout
+mean_wadj <- list()
+for(i in 1:nrow(tvn_contemp_pred)){
+  mean_wadj[[i]] <- apply(tvn_contemp_pred$tvmgm[[i]][["pairwise"]][["wadj"]], 1:2, mean)
+}
+
+#negative signs are stored separately so apply them to the relevant parameter estimates
+par_ests <- list()
+for(i in 1:nrow(tvn_contemp_pred)){
+  par_ests[[i]] <- (tvn_contemp_pred$tvmgm[[i]][["pairwise"]][["wadj"]])
+}
+
+ind_negative <- list()
+for(i in 1:nrow(tvn_contemp_pred)){
+  ind_negative[[i]] <- which(tvn_contemp_pred$tvmgm[[i]][["pairwise"]][["signs"]] == -1, arr.ind = T)
+}
+
+for(i in 1:nrow(tvn_contemp_pred)){
+  par_ests[[i]][ind_negative[[i]]] <- par_ests[[i]][ind_negative[[i]]]*-1
+}
+```
+
+# ----- Plotting ------
+
+```{r}
+# Get layout of mean graph
+Q_shit <- list()
+for(i in 1:length(mean_wadj)){
+  Q_shit[[i]] <- qgraph(t(mean_wadj[[i]]), layout="spring", DoNotPlot=T, repulsion=.6)
+}
+
+# Plot graph at selected fixed time points
+tpSelect <- 1:5
+
+#group by trait
+traitgroups <- list("Extraversion" = c(1:3), #columns in df
+                    "Agreeableness" = c(4:6),
+                    "Conscientiousness" = c(7:9),
+                    "Neuroticism" = c(10:12),
+                    "Openness" = c(13:15)
+                    )
+
+#default plotting settings
+theme_set(theme_bw(base_size = 14, base_family="Times") )
+theme_update(legend.position="bottom", 
+             panel.spacing=grid::unit(0,"lines"),
+             strip.background=element_rect(color="black",fill="white"),
+             panel.grid=element_blank())
+```
+
+```{r}
+tvn_plot_fnc <- function(tpSelect, par_ests, Q_shit, traitgroups, 
+                         tvmgm, preds, SID, bw) {
+  plots <- list()  # List to store qgraph plots
+  
+  for (tp in tpSelect) {
+    plots[[as.character(tp)]] <- qgraph(t(par_ests[, , tp]),  
+                                        layout = Q_shit$layout,  
+                                        groups = traitgroups, 
+                                        legend = FALSE,
+                                        palette = 'colorblind',
+                                        width = 15 * 1.4, height = 16,
+                                        border.width = 0.5, label.cex = 0.7, 
+                                        label.color = 'black', label.prop = 0.9, 
+                                        negDashed = TRUE, loop = 0.7,
+                                        edge.color = t(tvmgm[["pairwise"]][["edgecolor"]][, , tp]), 
+                                        labels = c("Sociability", "Energy Level", "Assertive",
+                                                   "Trust", "Respect", "Compassion",
+                                                   "Productivity",
+                                                   "Responsibility", "Organization",
+                                                   "Depression", "Anxiety",
+                                                   "Emo Volatility", "Int Curiosity", 
+                                                   "Aesth Sense", "Crtv Imagination"), 
+                                        minimum = 0, maximum = .5, title.cex=1, 
+                                        border.color = "grey60", edge.color = "grey60", 
+                                        trans=1, fade=FALSE,
+                                        vTrans = 190, details = FALSE, shape = "ellipse", 
+                                        node.width=1, node.height=.6, vsize = 13, 
+                                        asize = 4, edge.width=.6, label.font=15, 
+                                        label.scale=FALSE,
+                                        pie = preds[["tverrors"]][[tp]][["R2"]],  
+                                        title = "",
+                                        # title=paste("Participant",
+                                        #             unique(as.character(SID)), "TVN",
+                                        #             "Estimation Point",
+                                        #             as.character(tp), "\nBandwidth =",
+                                        #             round(bw,3)),
+                                        layoutOffset=c(0,0), GLratio=3.5, layoutScale=c(.8, .8),
+                                        DoNotPlot = TRUE)  
+  }
+  
+  return(plots)
+}
+
+# Create a tibble to store results
+tvmgm_plots <- tibble(
+  SID = tvn_contemp_pred$SID,  
+  con_networks = lapply(seq_len(nrow(tvn_contemp_pred)), function(i) {
+    tvn_plot_fnc(tpSelect, par_ests[[i]], Q_shit[[i]], traitgroups, 
+                 tvmgm = tvn_contemp_pred$tvmgm[[i]], preds = tvn_contemp_pred$pred[[i]], 
+                 SID = tvn_contemp_pred$SID[i], 
+                 bw = tvn_contemp_pred$bandwidth[i])  
+  })
+)
+
+#test to make sure SID and entwork are aligned; i checked this before i commented out the title
+x <- tvmgm_plots %>% filter(SID == 109324)
+plot(x$con_networks[[1]][["4"]])
+
+save(tvmgm_plots, file = "Data/tvmgm_plots.RData")
+```
+
+Separate code to save as pdf
+
+```{r}
+tvn_plot_pdf_fnc <- function(tpSelect, par_ests, Q_shit, traitgroups, tvmgm, preds, SID, bw){
+   for (tp in tpSelect) {
+     qgraph(par_ests[[i]][, , tp], #parameter estimates to graph
+                 layout = Q_shit[[i]]$layout, #using mean; "spring" has overlapping nodes
+                 groups = traitgroups, #group traits by color
+                 palette = 'colorblind',
+                 width = 15 * 1.4, # width of figure
+                 height = 16, # height of figure,
+                 border.width = 0.5,
+                 label.cex = 0.7, # scalar on label size
+                 label.color = 'black', # string on label colors
+                 label.prop = 0.9, 
+                 negDashed = T, #this aint workin
+                 loop = 0.7,
+                 edge.color = t(tvn_contemp_pred$tvmgm[[1]][["pairwise"]][["edgecolor"]][, 1, tp]), 
+                 labels = c("Sociability", "Energy Level", "Assertive", "Trust", "Respect",
+                            "Compassion", "Productivity",
+                            "Responsibility", "Organization", "Depression", "Anxiety",
+                            "Emo Volatility", "Int Curiosity", "Aesth Sense", 
+                            "Crtv Imagination"), #variable names
+                 minimum = 0, #min value for edge to be shown
+                 maximum = .5, #max to scale edge weights
+                 threshold = 0.1,
+                 title.cex=1, #title size
+                 border.color = "grey60", edge.color = "grey60", 
+                 trans=1,fade=F,
+                 vTrans = 190, # transparency of the nodes to better determine edges crossing node areas
+                 details = F, shape = "ellipse", node.width=1, node.height=.6, # node appearance
+                 vsize = 13, #node size 
+                 asize = 4, #arrow head size
+                 edge.width=.6,
+                 label.font=15, 
+                 label.scale=F,
+                 #pie = preds[[i]]$tverrors[[tp]][, 3], #hold off for conference talk
+                 title=paste(paste0("Participant ", 
+                                    unique(as.character(SID[[i]])), 
+                                    " Time-Varying Contemporaneous Network",
+                                    " Estimation Point ", as.character(tp), 
+                                    "\nBandwidth = ",round(bw[i],3))),
+                 layoutOffset=c(0,0), 
+                 GLratio=3.5, 
+                 layoutScale=c(.8, .8))
+  }
+}
+
+```
+
+```{r}
+pdf("Figures/Networks/Contemporaneous Networks.pdf")
+for(i in 1:nrow(tvn_contemp_pred)){
+  tvn_plot_pdf_fnc(tpSelect, par_ests, Q_shit, traitgroups, tvmgm = tvn_contemp_pred$tvmgm, preds = tvn_contemp_pred$pred, SID = tvn_contemp_pred$SID, bw = tvn_contemp_pred$bandwidth)
+}
+dev.off()
+```
+
+## SIMRAN GIF CODE
+
+```{r}
+draw_network = function(phi_matrix, timepoint, max_timepoints){
+  timepoint_network = qgraph(phi_matrix,
+                             posCol = "#435F90", negCol = "#8C2B0E",
+                             negDashed = TRUE,
+                             labels = c("Female \nPA", "Female \nNA", "Male \nPA", "Male \nNA"),
+                             label.scale.equal = TRUE,
+                             layout = "circle",
+                             title = paste0("Day ", timepoint, " of ", max_timepoints))
+  
+  return(timepoint_network)
+}
+draw_network_overall = function(dyad_array){
+  # give as input the array containing phi matrices
+  # for a single individual
+  
+  max_timepoints = dim(dyad_array)[3]
+  
+  network_list = lapply(1:max_timepoints, function(x) draw_network(dyad_array[, , x], timepoint = x,
+                                                                   max_timepoints = max_timepoints))
+  
+  return(network_list)
+}
+
+dyad_networks_all = lapply(1:length(dyad_timepointestimates),
+                           function(x) draw_network_overall(dyad_timepointestimates[[x]]))
+
+# Save GIFs for all dyads
+
+for(i in 1:length(dyad_networks_all)){
+  
+  max_timepoints = length(dyad_networks_all[[i]])
+  
+  saveGIF(for(j in 1:max_timepoints){qgraph(dyad_networks_all[[i]][[j]])},
+          interval = 0.25,
+          movie.name = paste0("/Users/simranjohal/Desktop/School/Graduate School/Year 4/PSC 290 - Data Visualization/Final Project/Dyad GIFs/Dyad", i, "_NetworkGIF.gif"),
+          ani.width = 500, ani.height = 500)
+  
+  print(i)
+  
+}
+
+```
+
+```{r}
+
+x$graphAttributes$Edges$lty[plot$Edgelist$weight < 0] <- 2
+x$graphAttributes$Edges$color <- ifelse(abs(x$Edgelist$weight) <.1, edge_colors[1],
+                                           ifelse(abs(x$Edgelist$weight) <.2, edge_colors[2],
+                                                  edge_colors[3]))
+qgraph(x)
+```
+
+```{r}
+edge_colors <- RColorBrewer::brewer.pal(8, "Purples")[c(3,5,7)]
+plot_fun <- function(data, SID, dataset){
+  # nvar <- dim(data_mod)[2]
+  groups <- list(
+    lifesat = which(rownames(data) == "lifesat")
+    , other = seq(1:nrow(data))[-which(rownames(data) == "lifesat")]
+  ) #ok let's try and group by traits
+  plot <- qgraph(data
+                 , layout = "spring"
+                 , title = sprintf("%s: %s for S%s", dataset, type, SID)
+                 , loop = .7
+                 , node.width = 1.4
+                 , edge.width = 1
+                 , label.font = 2
+                 , label.fill.vertical = 1
+                 , label.fill.horizontal = 1
+                 , edge.color = "black"
+                 , groups = groups
+                 , color = c(RColorBrewer::brewer.pal(3, "Set3")[1], "white")
+                 , legend = F
+                 , DoNotPlot = TRUE
+                 , mar = c(4,4,4,4)
+                 , asize = 6
+                 , border.width = 2.5
+  )
+  plot$graphAttributes$Edges$lty[plot$Edgelist$weight < 0] <- 2
+  plot$graphAttributes$Edges$color <-
+    ifelse(abs(plot$Edgelist$weight) <.1, edge_colors[1],
+           ifelse(abs(plot$Edgelist$weight) <.2, edge_colors[2], edge_colors[3]))
+  return(plot)
+}
+```
+
+#stat
+
+```{r}
+load(sprintf("%s/Data/stationary_models.RData", wd)) 
+```
+
+Layout stuff
+
+```{r}
+mean_wadj <- list()
+for (i in 1:nrow(stationary_models)) {
+  mean_wadj[[i]] <- stationary_models$con_models[[i]][["pairwise"]][["wadj"]]  # Using the contemporaneous network for layout
+}
+
+# Get layout of mean graph
+Q_shit <- list()
+for (i in 1:length(mean_wadj)) {
+  Q_shit[[i]] <- qgraph(t(mean_wadj[[i]]), layout = "spring", DoNotPlot = TRUE, repulsion = 0.6)
+}
+```
+
+xtra stuff
+
+```{r}
+#group by trait
+traitgroups <- list("Extraversion" = c(1:3), #columns in df
+                    "Agreeableness" = c(4:6),
+                    "Conscientiousness" = c(7:9),
+                    "Neuroticism" = c(10:12),
+                    "Openness" = c(13:15)
+                    )
+
+#default plotting settings
+theme_set(theme_bw(base_size = 14, base_family="Times"))
+theme_update(legend.position="bottom", 
+             panel.spacing=grid::unit(0,"lines"),
+             strip.background=element_rect(color="black",fill="white"),
+             panel.grid=element_blank())
+```
+
+Lagged parameter estimates w sign
+
+```{r}
+#negative signs are stored separately so apply them to the relevant parameter estimates
+lag_par_ests <- list()
+for(i in 1:nrow(stationary_models)){
+  lag_par_ests[[i]] <- (stationary_models$lag_models[[i]][["wadj"]])
+  }
+
+lag_ind_negative <- list()
+for(i in 1:nrow(stationary_models)){
+  lag_ind_negative[[i]] <- which(stationary_models$lag_models[[i]][["signs"]] == -1, arr.ind = T)
+  }
+
+for(i in 1:nrow(stationary_models)){
+  lag_par_ests[[i]][lag_ind_negative[[i]]] <- lag_par_ests[[i]][lag_ind_negative[[i]]]*-1
+}
+
+for(i in 1:nrow(stationary_models)){
+  lag_par_ests[[i]][stationary_models$lag_models[[i]][["edgecolor"]]=="red"] <-         lag_par_ests[[i]][stationary_models$lag_models[[i]][["edgecolor"]]=="red"] * -1
+}
+```
+
+Con parameter estimates w sign
+
+```{r}
+#negative signs are stored separately so apply them to the relevant parameter estimates
+con_par_ests <- list()
+for(i in 1:nrow(stationary_models)){
+  con_par_ests[[i]] <- (stationary_models$con_models[[i]][["pairwise"]][["wadj"]])
+  }
+
+con_ind_negative <- list()
+for(i in 1:nrow(stationary_models)){
+  con_ind_negative[[i]] <- which(stationary_models$con_models[[i]][["pairwise"]][["signs"]] == -1, arr.ind = T)
+  }
+
+for(i in 1:nrow(stationary_models)){
+  con_par_ests[[i]][con_ind_negative[[i]]] <- con_par_ests[[i]][con_ind_negative[[i]]]*-1
+}
+
+for(i in 1:nrow(stationary_models)){
+  con_par_ests[[i]][stationary_models$con_models[[i]][["pairwise"]][["edgecolor"]]=="red"] <-         con_par_ests[[i]][stationary_models$con_models[[i]][["pairwise"]][["edgecolor"]]=="red"] * -1
+}
+```
+
+```{r}
+# ----- Define Plotting Function ------
+stationary_plot_fnc <- function(par_ests, Q_shit, traitgroups, SID, type, preds) {
+  qgraph(par_ests, 
+         layout = Q_shit$layout, 
+         groups = traitgroups, 
+         legend = FALSE,
+         palette = 'colorblind',
+         width = 15 * 1.4, height = 16,
+         border.width = 0.5, label.cex = 0.7, 
+         label.color = 'black', label.prop = 0.9, 
+         negDashed = TRUE, loop = 0.7,
+         labels = c("Sociability", "Energy Level", "Assertive", "Trust",
+                    "Respect", "Compassion", "Productivity", "Responsibility" , 
+                    "Organization", "Depression", "Anxiety",
+                    "Emo Volatility", "Int Curiosity", "Aesth Sense", "Crtv Imagination"), 
+         minimum = 0, maximum = .5, title.cex = 1, 
+         border.color = "grey60", edge.color = "grey60", 
+         trans = 1, fade = FALSE,
+         vTrans = 190, details = FALSE, shape = "ellipse", 
+         node.width = 1, node.height = .6, vsize = 13, 
+         asize = 4, edge.width = .6, label.font = 15,
+         pie = preds[["errors"]][["R2"]], 
+         label.scale = FALSE,
+         title = "",
+         # title = paste("Participant", unique(as.character(SID)), type, "Stationary Network"),
+         layoutOffset = c(0, 0), GLratio = 3.5, layoutScale = c(.8, .8),
+         DoNotPlot = TRUE)  # Store plot instead of displaying it
+}
+
+```
+
+networks
+
+```{r}
+# ----- Store Results in a Tibble ------
+stationary_plots <- tibble(
+  SID = sapply(stationary_models$SID, unique),
+  stat_con_networks = lapply(seq_len(nrow(stationary_models)), 
+                             function(i) {
+                               stationary_plot_fnc(con_par_ests[[i]], 
+                                                   Q_shit[[i]], traitgroups, 
+                                                   stationary_models$SID[[i]], 
+                                                   "Contemporaneous",
+                                                   stationary_models$con_models[[i]][["predictions"]])
+                                                                                     
+                               }),
+  stat_lag_networks = lapply(seq_len(nrow(stationary_models)),
+                             function (i) {stationary_plot_fnc(lag_par_ests[[i]][,,1], #not a matrix for some reason 
+                                   Q_shit[[i]], traitgroups, 
+                                   stationary_models$SID[[i]], 
+                                   "Lagged",
+                                   stationary_models$lag_models[[i]][["predictions"]]
+                                   )
+                             }
+                             )
+  )
+
+#make sure SID and network matches up; they did before i removed title
+x <- stationary_plots %>% filter(SID == 109324)
+plot(x$stat_lag_networks[[1]])
+plot(x$stat_con_networks[[1]])
+
+plot(stationary_plots$stat_lag_networks[[39]])
+
+save(stationary_plots, file = "Data/stationary_plots.RData")
+```
+
+PDFs Function that includes title
+
+```{r}
+# ----- Define Plotting Function ------
+stationary_plot_pdf_fnc <- function(par_ests, Q_shit, traitgroups, SID, type, preds) {
+  qgraph(par_ests, 
+         layout = Q_shit$layout, 
+         groups = traitgroups, 
+         legend = FALSE,
+         palette = 'colorblind',
+         width = 15 * 1.4, height = 16,
+         border.width = 0.5, label.cex = 0.7, 
+         label.color = 'black', label.prop = 0.9, 
+         negDashed = TRUE, loop = 0.7,
+         labels = c("Sociability", "Energy Level", "Assertive", "Trust",
+                    "Respect", "Compassion", "Productivity", "Responsibility" , 
+                    "Organization", "Depression", "Anxiety",
+                    "Emo Volatility", "Int Curiosity", "Aesth Sense", "Crtv Imagination"), 
+         minimum = 0, maximum = .5, title.cex = 1, 
+         border.color = "grey60", edge.color = "grey60", 
+         trans = 1, fade = FALSE,
+         vTrans = 190, details = FALSE, shape = "ellipse", 
+         node.width = 1, node.height = .6, vsize = 13, 
+         asize = 4, edge.width = .6, label.font = 15,
+         pie = preds[["errors"]][["R2"]], 
+         label.scale = FALSE,
+        title = paste("Participant", unique(as.character(SID)), type, "Stationary Network"),
+         layoutOffset = c(0, 0), GLratio = 3.5, layoutScale = c(.8, .8)) 
+}
+```
+
+Contemp
+
+```{r}
+pdf("Figures/Networks/Contemporaneous Stationary Networks.pdf")
+for(i in 1:nrow(stationary_models)){
+  stationary_plot_pdf_fnc(con_par_ests[[i]], 
+                      Q_shit[[i]], traitgroups, 
+                      stationary_models$SID[[i]], 
+                      "Contemporaneous",
+                      stationary_models$con_models[[i]][["predictions"]])
+}
+dev.off()
+```
+
+Lagged
+
+```{r}
+pdf("Figures/Networks/Lagged Stationary Networks.pdf")
+for(i in 1:nrow(stationary_models)){
+  stationary_plot_pdf_fnc(lag_par_ests[[i]][,,1], #not a matrix for some reason 
+                                   Q_shit[[i]], traitgroups, 
+                                   stationary_models$SID[[i]], 
+                                   "Lagged",
+                                   stationary_models$lag_models[[i]][["predictions"]])
+}
+dev.off()
+```

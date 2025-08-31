@@ -1,0 +1,181 @@
+---
+title: "3_1. Contemporaneous Time Varying Networks AND RuleReg"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(mgm)
+library(psych)
+library(lavaan)
+library(furrr)
+library(kableExtra)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+
+```
+
+Load Data
+
+```{r}
+#load(sprintf("%s/Data/tvn_data.RData", wd))
+#load(sprintf("%s/Data/tvn_contemp_bw.RData", wd)) #this script, contains bws
+load(sprintf("%s/Data/tvn_contemp.RData", wd)) #this script, contains contemporaneous models
+```
+
+##Bandwidth Selection
+
+```{r}
+bwSeq <- seq(0.01, 2.5, length =25)
+
+bw_select_fnc_timeout <- function(x){
+  tryCatch(
+    callr::r (mgm::bwSelect,
+              args = list(data = x %>%
+                            select(Sociability:CrtvImagination) %>%
+                            as.matrix(),
+                          type = rep("g", 15), #gaussian
+                          level = rep(1, 15), #continuous
+                          bwSeq = bwSeq, #bandwidths to try
+                          bwFolds = 1, #single split (half training half test)
+                          bwFoldsize = 10,
+                          modeltype = 'mgm', #contemporaneous
+                          k = 2, 
+                          threshold = 'HW', #haslbeck waldorp threshold; min effect size
+                          ruleReg = 'AND', #nah, OR results in too many parameters; OLD COMMENT: better complement to the time varying VAR; one way contemporaneous effects are potentially reflected by longer time spanning lagged effects
+                          timepoints = x$time_norm,
+                          pbar = TRUE),
+              timeout = 500,
+              package = T),
+    error = function (e) e
+  )
+}
+
+```
+
+Do it
+
+```{r, warning = FALSE}
+plan(multisession, workers = availableCores() - 1)
+
+tvn_contemp_bw <- future_map(tvn_data$data,
+                            function(x) bw_select_fnc_timeout(x),
+                            .progress=TRUE)
+
+```
+
+Add column of bandwidth that minimizes mean error
+
+```{r}
+tvn_data <- tvn_data %>%
+  mutate(bandwidth = map(tvn_contemp_bw, function(x) bwSeq[which.min(x$meanError)]))
+
+#turn wonky ass list into a vector
+is.na(tvn_data$bandwidth) <- lengths(tvn_data$bandwidth) == 0
+tvn_data$bandwidth <- unlist(tvn_data$bandwidth)
+
+tvn_contemp_bw <- tvn_data
+save(tvn_contemp_bw, file = "Data/tvn_contemp_bw.RData")
+```
+
+Subset (no NA bandwidths)
+
+```{r}
+tvn_data_contemp <- tvn_contemp_bw %>%
+ filter(!is.na(bandwidth))
+```
+
+Estimate TV-MGM Model using bandwidth that minimizes Mean absolute error.
+
+```{r}
+pers_tvmgm_function <- function(x, bandwidth){
+  tvmgm(data = x %>%
+           select(Sociability:CrtvImagination) %>%
+           as.matrix(),
+        type = rep("g", 15),
+        level = rep(1, 15), 
+        lambdaSel = "CV",
+        k=2,
+        timepoints = x$time_norm, 
+        estpoints = seq(0, 1, length = 5), 
+        bandwidth = bandwidth,
+        threshold = "HW",
+        ruleReg = "AND")
+}
+```
+
+Function on no NA tibble
+
+```{r}
+plan(multisession, workers = availableCores() - 1)
+
+tvn_data_contemp <- tvn_data_contemp %>%
+  mutate(tvmgm = future_map2(.x = tvn_data_contemp$data, .y = tvn_data_contemp$bandwidth,
+                          pers_tvmgm_function,
+                          .progress=TRUE))
+#tvn_data_contemp$tvmgm[[1]]
+```
+
+Test on Exemplar with absurdly high bandwidth
+
+```{r, eval = FALSE}
+tvn_ex <- tvn_data %>% filter(SID == 31624) %>% tibble()
+
+absurd_tvmgm <- tvmgm(data = tvn_ex$data[[1]] %>%
+           select(Sociability:CrtvImagination) %>%
+           as.matrix(),
+        type = rep("g", 15),
+        level = rep(1, 15),
+        lambdaSel = "CV",
+        k=2,
+        timepoints = tvn_ex$data[[1]]$time_norm,
+        estpoints = seq(0, 1, length = 5),
+        bandwidth = 1000,
+        threshold = "none",
+        ruleReg = "AND")
+
+
+
+par_ests <-  absurd_tvmgm[["tvmodels"]][[1]][["pairwise"]][["wadj"]]
+
+ind_negative <- which(absurd_tvmgm[["tvmodels"]][[1]][["pairwise"]][["signs"]] == -1)
+
+par_ests[ind_negative] <- par_ests[ind_negative]*-1
+
+
+
+qgraph::qgraph(absurd_tvmgm[["tvmodels"]][[1]][["pairwise"]][["wadj"]],
+               edge_color <- ifelse(t(par_ests) > 0, "#0072B2", "#D55E00"),
+               layout = "circle",
+               edge.color = edge_color
+)
+fuck
+
+#good they're effectively the same
+
+```
+
+##Predictions
+
+```{r}
+fuckyou <- list()
+for(i in 1:nrow(tvn_data_contemp)){
+  fuckyou[[i]] <- predict(object = tvn_data_contemp$tvmgm[[i]],
+          data = tvn_data_contemp$data[[i]] %>%
+            select(Sociability:CrtvImagination), 
+          errorCon = c("R2", "RMSE"),
+          tvMethod = "weighted", 
+          beepvar = tvn_data_contemp$data[[i]]$beepno,
+          dayvar = tvn_data_contemp$data[[i]]$dayno)
+  
+  print(i) #no errors!
+}
+
+tvn_contemp_pred <- tvn_data_contemp %>% mutate(pred = fuckyou)
+
+save(tvn_contemp_pred, file="Data/tvn_contemp_pred.RData")
+```

@@ -1,0 +1,104 @@
+---
+title: "2_1. Lagged Bandwidth Estimation"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(mgm)
+library(plyr)
+library(psych)
+library(lavaan)
+library(furrr)
+library(ggridges)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/tvn_data.RData", wd))
+```
+
+Function that selects bandwidth but doesn't get stuck; sets a timeout (max 1000 s)
+
+bandwidth sequence \[0,2\] bandwidths \>1.5 imply a good stationary fit (using most of the data in the t.s.)
+
+```{r}
+bwSeq <- seq(0.01, 2.5, length =25)
+
+bw_select_fnc_timeout <- function(x){
+  tryCatch(
+    callr::r (mgm::bwSelect,
+              args = list(data = x %>%
+                            select(Sociability:CrtvImagination),
+                          type = rep("g", 15), #gaussian
+                          level = rep(1, 15), #continuous
+                          bwSeq = bwSeq, #bandwidths to try
+                          bwFolds = 1,
+                          bwFoldsize = 10,
+                          modeltype = "mvar",
+                          lags = 1,
+                          scale = TRUE,
+                          timepoints = x$time_norm,
+                          beepvar = x$beepno,
+                          dayvar = x$dayno,
+                          pbar = TRUE),
+              timeout = 1000,
+              package = T),
+    error = function (e) e
+        )
+}
+```
+
+Do it
+
+```{r, warning = FALSE}
+plan(multisession, workers = availableCores() - 1)
+
+tvn_bw <- future_map(tvn_data$data,
+                            function(x) bw_select_fnc_timeout(x),
+                            .progress=TRUE)
+plan(sequential)
+```
+
+Add column of bandwidth that minimizes mean error
+
+```{r}
+tvn_data <- tvn_data %>%
+  mutate(bandwidth = map(tvn_bw, function(x) bwSeq[which.min(x$meanError)]))
+
+#turn wonky ass list into a vector
+is.na(tvn_data$bandwidth) <- lengths(tvn_data$bandwidth) == 0
+tvn_data$bandwidth <- unlist(tvn_data$bandwidth)
+
+#preserve og data
+tvn_data_bw <- tvn_data
+
+save(tvn_data_bw, file = "Data/tvn_data_bw.RData")
+```
+
+Proportions and descriptives of bandwidths by study
+
+```{r}
+#calc proportions 
+tvn_data_bw %>%
+  mutate(study = ifelse(study %in% c("PPS", "CPE"), "PPS_CPE", study)) %>%
+  mutate(bandwidth = ifelse(is.na(bandwidth), 2, bandwidth)) %>% #make NAs stationary for props
+  group_by(study) %>%
+  summarize(bw_prop = sum(bandwidth < 1.5)/length(bandwidth))
+
+#descriptives
+tvn_data_bw %>%
+  mutate(study = ifelse(study %in% c("PPS", "CPE"), "PPS_CPE", study)) %>%
+  group_by(study) %>%
+  na.omit %>%
+  summarize(mean = mean(bandwidth, na.rm = TRUE),
+            sd = sd(bandwidth, na.rm = TRUE),
+            corr = cor(bandwidth, obs))
+```

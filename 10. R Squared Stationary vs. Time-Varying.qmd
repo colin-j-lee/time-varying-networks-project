@@ -1,0 +1,750 @@
+---
+title: "10. Stationary vs. Time-Varying"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(mgm)
+library(plyr)
+library(psych)
+library(lavaan)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/tvn_tvvar_pred.RData", wd)) #lagged tv models
+load(sprintf("%s/Data/tvn_contemp_pred.RData", wd)) #contemp tv models
+load(sprintf("%s/Data/stationary_models.RData", wd)) #stationary models; both lagged and contemp
+
+# all models SIDS
+load(sprintf("%s/Data/network_plots.RData", wd)) #tibble w stationary plots
+
+#created in this script
+#load(sprintf("%s/Data/comparison_tibble.RData", wd))
+
+```
+
+Extract average R squared across 5 sets of time varying models for lagged and contemp
+
+```{r}
+valid_lag_SIDs <- network_plots %>%
+  filter(lag_bw < 1.5) %>%
+  pull(SID)
+
+valid_con_SIDs <- network_plots %>%
+  filter(con_bw < 1.5) %>%
+  pull(SID)
+
+#its called average r2 cause its pulling the already averaged r2 from the mgm object
+average_r2 <- function(pred_list) {
+  pred_list$errors$R2
+}
+
+# Apply to tv_lagged
+tv_lagged <- tvn_tvvar_pred %>%
+  filter(SID %in% valid_lag_SIDs) %>%
+  arrange(SID) %>%
+  mutate(tv_lagged = map(pred, average_r2)) %>%
+  select(SID, tv_lagged)
+
+# Apply to tv_contemp
+tv_contemp <- tvn_contemp_pred %>%
+  filter(SID %in% valid_con_SIDs) %>%
+  arrange(SID) %>%
+  mutate(tv_contemp = map(pred, average_r2)) %>%
+  select(SID, tv_contemp)
+```
+
+Combine R squareds across four models into one df
+
+```{r}
+# R²s from stationary model
+stationary_lagged <- stationary_models %>%
+  filter(SID %in% valid_lag_SIDs) %>%
+  mutate(
+    stationary_lagged = map(lag_models, ~ .x[["predictions"]][["errors"]][["R2"]])
+  ) %>%
+  select(SID, stationary_lagged)
+
+stationary_contemp <- stationary_models %>%
+  filter(SID %in% valid_con_SIDs) %>%
+  mutate(
+    stationary_contemp = map(con_models, ~ .x$predictions$errors$R2)
+  ) %>%
+  select(SID, stationary_contemp)
+```
+
+Combine into one tibby
+
+```{r}
+# Create a union of all valid SIDs across both model types
+all_valid_SIDs <- union(valid_lag_SIDs, valid_con_SIDs) %>% sort()
+
+# Create a full SID tibble to join onto
+all_SIDs <- tibble(SID = all_valid_SIDs)
+
+# Start from all valid SIDs
+comparison_tibble <- all_SIDs %>%
+  left_join(tv_lagged, by = "SID") %>%
+  left_join(tv_contemp, by = "SID") %>%
+  left_join(stationary_lagged, by = "SID") %>%
+  left_join(stationary_contemp, by = "SID")
+
+save(comparison_tibble, file = "Data/comparison_tibble.RData")
+```
+
+```{r}
+compare_r2s <- function(SID, tv_lagged, tv_contemp, stationary_lagged, stationary_contemp) {
+  lagged_diff <- if (!is.null(tv_lagged) && !is.null(stationary_lagged)) {
+    (tv_lagged) - (stationary_lagged)
+  } else {
+    rep(NA_real_, 15)
+  }
+
+  contemp_diff <- if (!is.null(tv_contemp) && !is.null(stationary_contemp)) {
+    (tv_contemp) - (stationary_contemp)
+  } else {
+    rep(NA_real_, 15)
+  }
+
+  tibble(
+    SID = SID,
+    lagged_diff = lagged_diff,
+    contemp_diff = contemp_diff
+  )
+}
+
+plan(multisession, workers = 8)
+
+r_comp_results <- future_pmap_dfr(
+  list(
+    comparison_tibble$SID,
+    comparison_tibble$tv_lagged,
+    comparison_tibble$tv_contemp,
+    comparison_tibble$stationary_lagged,
+    comparison_tibble$stationary_contemp
+  ),
+  compare_r2s
+) %>%
+  mutate(Variable = rep(c("Sociability", "EnergyLevel", "Assertive",
+                      "Trust", "Respect", "Compassion",
+                      "Productivity", "Responsibility", "Organization", 
+                      "Depression", "Anxiety", "EmotionalVol",    
+                      "IntCuriosity", "AesthSense", "CrtvImagination"), nrow(comparison_tibble))
+         ) %>%
+  select(SID, Variable, contains("diff"))
+
+plan(sequential)
+
+table(r_comp_results$contemp_diff > 0)
+table(r_comp_results$lagged_diff > 0)
+
+```
+
+R Squared differences
+
+```{r}
+r_comp_results_cleaned <- r_comp_results %>%
+  rename(Contemporaneous = contemp_diff,
+         Lagged = lagged_diff) %>%
+  mutate(Contemporaneous = ifelse(Contemporaneous < -1, NA, Contemporaneous))
+
+df_long <- r_comp_results_cleaned %>%
+  select(SID, Variable, Contemporaneous, Lagged) %>%
+  pivot_longer(cols = c(Contemporaneous, Lagged), names_to = "Comparison", values_to = "R2_Diff") 
+
+# Remove R2_Diff values with frequency < 1 cause the x axis gets wonky
+df_long <- df_long %>%
+  group_by(R2_Diff) %>%
+  filter(n() > 2) %>%
+  ungroup()
+
+
+# Define the  variable order
+var_order <- c("Sociability", "EnergyLevel", "Assertive", "Trust", "Respect",
+               "Compassion", "Productivity", "Responsibility", "Organization",
+               "Depression", "Anxiety", "EmotionalVol", "IntCuriosity",
+               "AesthSense", "CrtvImagination")
+
+# Make sure Variable is a factor with the desired order
+df_long$Variable <- factor(df_long$Variable, levels = var_order)
+
+# Compute the global min and max for centering zero
+global_min <- min((df_long$R2_Diff), na.rm = TRUE)/3
+global_max <- max(df_long$R2_Diff, na.rm = TRUE)  # Largest max
+
+# Define colors
+ito_colors <- ggpubfigs::friendly_pal("ito_seven")
+
+#mean and median
+summary_medians <- df_long %>%
+  group_by(Variable, Comparison) %>%
+  summarise(median = median(R2_Diff, na.rm = TRUE), .groups = "drop")
+
+#plot
+density_plot <- ggplot(df_long, aes(x = R2_Diff, fill = Comparison)) +
+  geom_density(alpha = 0.5, adjust = 0.5) +
+  geom_vline(
+    data = summary_medians,
+    aes(xintercept = median, color = Comparison),
+    linetype = "dashed",
+    linewidth = 1,
+    show.legend = FALSE
+  ) +
+  facet_wrap(~ Variable, ncol = 3, nrow = 5, scales = "fixed") +
+  scale_fill_manual(name = "", values = c(Contemporaneous = ito_colors[1],
+                                          Lagged = ito_colors[2])) +
+  scale_color_manual(name = NULL, values = c(Contemporaneous = ito_colors[1],
+                                             Lagged = ito_colors[2])) +
+  coord_cartesian(xlim = c(global_min, global_max)) +
+  theme_minimal() +
+  labs(title = "Density Distributions of R-Squared Differences Across Facets",
+       x = "R-Squared Difference",
+       y = "Density") +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 25),
+    axis.title.x = element_text(size = 20, face = "bold"),
+    axis.title.y = element_text(size = 20, face = "bold"),
+    axis.text.x = element_text(size = 16),
+    axis.text.y = element_text(size = 16),
+    strip.text = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 20),
+    legend.title = element_text(size = 20, face = "bold")
+  )
+
+
+density_plot
+
+ggsave("Manuscript Tables and Figures/RSquared_Density_Plots.png", plot = density_plot, width = 15*1.5, height = 10*1.5, dpi = 750, bg = "white")
+
+```
+
+## Raw R squared distributions
+
+```{r}
+# Define facet_labels
+facet_labels <- c(
+  Sociability = "Sociability",
+  EnergyLevel = "Energy Level",
+  Assertive = "Assertive",
+  Trust = "Trust",
+  Respect = "Respect",
+  Compassion = "Compassion",
+  Productivity = "Productivity",
+  Responsibility = "Responsibility",
+  Organization = "Organization",
+  Depression = "Depression",
+  Anxiety = "Anxiety",
+  EmotionalVol = "Emotional Volatility",
+  IntCuriosity = "Intellectual Curiosity",
+  AesthSense = "Aesthetic Sensitivity",
+  CrtvImagination = "Creative Imagination"
+)
+
+# Define states
+states <- names(facet_labels)
+
+r2_long <- comparison_tibble %>%
+  select(SID, tv_lagged, tv_contemp, stationary_lagged, stationary_contemp) %>%
+  mutate(across(-SID, ~ map(.x, function(vec) {
+    if (is.null(vec)) return(NULL)
+    if (length(vec) == length(states)) return(set_names(vec, states))
+    else return(NULL)
+  }))) %>%
+  pivot_longer(-SID, names_to = "ModelType", values_to = "R2s") %>%
+  filter(!map_lgl(R2s, is.null)) %>%
+  unnest_longer(R2s, indices_to = "Variable") %>%
+  filter(R2s >= 0) %>%
+  mutate(
+    Variable = recode(Variable, !!!facet_labels),
+    Variable = factor(Variable, levels = unname(facet_labels))
+  )
+
+
+
+#for plotting
+ito_colors <- ggpubfigs::friendly_pal("ito_seven")
+
+# Calculate means
+means <- r2_long %>%
+  group_by(ModelType, Variable) %>%
+  summarise(mean_R2 = mean(R2s, na.rm = TRUE), .groups = "drop")
+
+means_con <- means %>%
+  filter(ModelType == "tv_contemp" | ModelType == "stationary_contemp") 
+
+means %>% group_by(ModelType) %>%
+  summarise(mean_R2 = mean(mean_R2, na.rm = TRUE))
+
+
+means_lag <- means %>%
+  filter(ModelType == "tv_lagged" | ModelType == "stationary_lagged") 
+
+mean(means_lag$mean_R2)
+
+```
+
+Contemporaneous dists
+
+```{r}
+r2_contemp <- r2_long %>%
+  filter(ModelType %in% c("tv_contemp", "stationary_contemp"))
+
+con_r_plot <- ggplot(r2_contemp, aes(x = R2s, fill = ModelType)) +
+ geom_histogram(alpha = 0.6, position = "identity", bins = 30, boundary = 0) +
+  facet_wrap(~ Variable, scales = "fixed", ncol = 3, nrow = 5) +
+  scale_fill_manual(values = c(tv_contemp = ito_colors[1],
+                               stationary_contemp = ito_colors[2]),
+                    labels = c("Stationary Contemp.", "Time-Varying Contemp.")) +
+  xlim(c(0,1)) +
+  geom_vline(data = means_con, aes(xintercept = mean_R2, color = ModelType),
+             linetype = "dashed", size = 1) +
+  scale_color_manual(values = c(tv_contemp = ito_colors[1],
+                                stationary_contemp = ito_colors[2])) +
+  labs(
+    title = "R² Distributions of Contemporaneous Models",
+    x = "R²",
+    y = "Density",
+    fill = "Model Type"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+    axis.title = element_text(size = 14),
+    strip.text = element_text(size = 13, face = "bold"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13),
+    legend.position = "bottom"
+  ) + 
+  guides(color = "none")
+
+con_r_plot
+
+ggsave("Manuscript Tables and Figures/Con_RSquared_Density_Plots.png", plot = con_r_plot, width = 15, height = 10, dpi = 300, bg = "white")
+```
+
+Lagged
+```{r}
+r2_lagged <- r2_long %>%
+  filter(ModelType %in% c("tv_lagged", "stationary_lagged"))
+
+lagged_r_plot <- ggplot(r2_lagged, aes(x = R2s, fill = ModelType)) +
+ geom_histogram(alpha = 0.6, position = "identity", bins = 30, boundary = 0) +
+  facet_wrap(~ Variable, scales = "fixed", ncol = 3, nrow = 5) +
+  scale_fill_manual(values = c(tv_lagged = ito_colors[1],
+                               stationary_lagged = ito_colors[2]),
+                    labels = c("Stationary Lagged", "Time-Varying Lagged")) +
+  xlim(c(0,1)) +
+  geom_vline(data = means_lag, aes(xintercept = mean_R2, color = ModelType),
+             linetype = "dashed", size = 1) +
+  scale_color_manual(values = c(tv_lagged = ito_colors[1],
+                                stationary_lagged = ito_colors[2])) +
+  labs(
+    title = "R² Distributions of Lagged Models",
+    x = "R²",
+    y = "Density",
+    fill = "Model Type"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+    axis.title = element_text(size = 14),
+    strip.text = element_text(size = 13, face = "bold"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13),
+    legend.position = "bottom"
+  ) + 
+  guides(color = "none")
+
+lagged_r_plot
+
+ggsave("Manuscript Tables and Figures/Lagged_RSquared_Density_Plots.png", plot = lagged_r_plot, width = 15, height = 10, dpi = 300, bg = "white")
+```
+
+Combine
+```{r}
+library(tidyverse)
+library(patchwork)
+
+# Order factor levels
+r2_contemp <- r2_long %>%
+  filter(ModelType %in% c("tv_contemp", "stationary_contemp")) %>%
+  mutate(ModelType = factor(ModelType, levels = c("stationary_contemp", "tv_contemp")))
+
+r2_lagged <- r2_long %>%
+  filter(ModelType %in% c("tv_lagged", "stationary_lagged")) %>%
+  mutate(ModelType = factor(ModelType, levels = c("stationary_lagged", "tv_lagged")))
+
+# Colorblind-safe palette
+blue_shades <- c("stationary_contemp" = "#CC79A7", "tv_contemp" = "#0072B2")
+orange_shades <- c("stationary_lagged" = "#009E73", "tv_lagged" = "#D55E00")
+
+# Label positions — slightly above for stationary, below for time-varying
+means_con <- means_con %>%
+  mutate(
+    label_x = mean_R2 + 0.005,
+    label_y = ifelse(ModelType == "stationary_contemp", 90, 60),
+    label = sub("^0", "", sprintf("%.2f", mean_R2))
+  )
+
+means_lag <- means_lag %>%
+  mutate(
+    label_x = mean_R2 + 0.005,
+    label_y = ifelse(ModelType == "stationary_lagged", 150, 100),
+    label = sub("^0", "", sprintf("%.2f", mean_R2))
+  )
+
+
+# Contemporaneous plot
+con_r_plot_clean <- r2_contemp %>%
+  ggplot(aes(x = R2s, fill = ModelType)) +
+  geom_histogram(alpha = 0.7, position = "identity", bins = 30, boundary = 0) +
+  facet_wrap(~ Variable, scales = "fixed", ncol = 3, nrow = 5) +
+  scale_fill_manual(
+    values = blue_shades,
+    labels = c("Stationary Contemp.", "Time-Varying Contemp."),
+    name = "Model Type"
+  ) +
+  geom_vline(data = means_con, aes(xintercept = mean_R2, color = ModelType),
+             linetype = "dashed", size = 1) +
+  geom_text(data = means_con,
+          aes(x = label_x, y = label_y, label = label),
+          hjust = 0, fontface = "bold", size = 4) +
+  scale_color_manual(values = blue_shades, guide = "none") +
+  xlim(c(0, 1)) +
+  labs(
+    title = "Contemporaneous Models",
+    x = NULL,
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+    legend.position = "bottom",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 13),
+    strip.text = element_text(size = 15, face = "bold"),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.y = element_text(size = 15, face = "bold", margin = margin(r = 10))
+
+  )
+
+# Lagged plot
+lagged_r_plot_clean <- r2_lagged %>%
+  ggplot(aes(x = R2s, fill = ModelType)) +
+  geom_histogram(alpha = 0.7, position = "identity", bins = 30, boundary = 0) +
+  facet_wrap(~ Variable, scales = "fixed", ncol = 3, nrow = 5) +
+  scale_fill_manual(
+    values = orange_shades,
+    labels = c("Stationary Lagged", "Time-Varying Lagged"),
+    name = "Model Type"
+  ) +
+  geom_vline(data = means_lag, aes(xintercept = mean_R2, color = ModelType),
+             linetype = "dashed", size = 1) +
+  geom_text(data = means_lag,
+          aes(x = label_x, y = label_y, label = label),
+          hjust = 0, fontface = "bold", size = 4) +
+  scale_color_manual(values = orange_shades, guide = "none") +
+  xlim(c(0, 1)) +
+  labs(
+    title = "Lagged Models",
+    x = "R²",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+    legend.position = "bottom",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 13),
+    strip.text = element_text(size = 15, face = "bold"),
+    axis.title.x = element_text(size = 15, face = "bold", margin = margin(t = 10)),
+    axis.title.y = element_text(size = 15, face = "bold", margin = margin(r = 10))
+  )
+
+# Combine
+combined_r_plot <- (con_r_plot_clean / lagged_r_plot_clean) +
+  plot_annotation(
+    title = "R² Distributions for Stationary vs. Time-Varying Models",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 22),
+      plot.margin = margin(20, 20, 20, 20)
+    )
+  )
+
+# Save
+ggsave("Manuscript Tables and Figures/Combined_RSquared_Density_Plots.png",
+       plot = combined_r_plot,
+       width = 15, height = 20, dpi = 300, bg = "white")
+
+```
+
+
+```{r}
+#make sure light is on top of dark
+r2_contemp <- r2_long %>%
+  filter(ModelType %in% c("tv_contemp", "stationary_contemp")) %>%
+  mutate(ModelType = factor(ModelType, levels = c("stationary_contemp", "tv_contemp")))
+
+r2_lagged <- r2_long %>%
+  filter(ModelType %in% c("tv_lagged", "stationary_lagged")) %>%
+  mutate(ModelType = factor(ModelType, levels = c("stationary_lagged", "tv_lagged")))
+
+# Distinct shades of blue and orange
+blue_shades <- c("tv_contemp" = "#0072B2", "stationary_contemp" = "#CC79A7")  # dark and light blue
+orange_shades <- c("tv_lagged" = "#D55E00", "stationary_lagged" = "#009E73")  # dark and light orange
+
+# Contemporaneous plot with legend at bottom
+con_r_plot_clean <- r2_contemp %>%
+  ggplot(aes(x = R2s, fill = ModelType)) +
+  geom_histogram(alpha = 0.7, position = "identity", bins = 30, boundary = 0) +
+  facet_wrap(~ Variable, scales = "fixed", ncol = 3, nrow = 5) +
+  scale_fill_manual(
+    values = blue_shades,
+    labels = c("stationary_contemp" = "Stationary Contemp.", "tv_contemp" = "Time-Varying Contemp."),
+    name = "Model Type"
+  ) +
+  geom_vline(data = means_con, aes(xintercept = mean_R2, color = ModelType),
+             linetype = "dashed", size = 1) +
+  scale_color_manual(values = blue_shades, guide = "none") +
+  xlim(c(0, 1)) +
+  labs(
+    title = "Contemporaneous Models",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    legend.position = "bottom",
+    strip.text = element_text(size = 15, face = "bold"),     # facet titles
+    legend.title = element_text(size = 14, face = "bold"),   # legend title
+    legend.text = element_text(size = 13, face = "bold")     # legend entries
+  )
+
+
+# Lagged plot with legend at bottom
+lagged_r_plot_clean <- r2_lagged %>%
+  ggplot(aes(x = R2s, fill = ModelType)) +
+  geom_histogram(alpha = 0.7, position = "identity", bins = 30, boundary = 0) +
+  facet_wrap(~ Variable, scales = "fixed", ncol = 3, nrow = 5) +
+  scale_fill_manual(
+    values = orange_shades,
+    labels = c("stationary_lagged" = "Stationary Lagged", "tv_lagged" = "Time-Varying Lagged"),
+    name = "Model Type"
+  ) +
+  geom_vline(data = means_lag, aes(xintercept = mean_R2, color = ModelType),
+             linetype = "dashed", size = 1) +
+  scale_color_manual(values = orange_shades, guide = "none") +
+  xlim(c(0, 1)) +
+  labs(
+    title = "Lagged Models",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    legend.position = "bottom",
+    strip.text = element_text(size = 15, face = "bold"),     # facet titles
+    legend.title = element_text(size = 14, face = "bold"),   # legend title
+    legend.text = element_text(size = 13, face = "bold")     # legend entries
+  )
+
+library(patchwork)
+
+# Create standalone layout for contemporaneous plot
+con_layout <- con_r_plot_clean +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+# Create standalone layout for lagged plot
+lagged_layout <- lagged_r_plot_clean +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+# Stack them vertically
+combined_r_plot <- con_layout / lagged_layout +
+  plot_annotation(
+    title = "R² Distributions of Time-Varying and Stationary Models",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 20),
+      axis.title.x = element_text(size = 18, face = "bold", margin = margin(t = 10)),
+      axis.title.y = element_text(size = 18, face = "bold", margin = margin(r = 10)),
+      plot.margin = margin(20, 20, 40, 60)
+    )
+  )
+
+
+ggsave("Manuscript Tables and Figures/Combined_RSquared_Density_Plots.png",
+       plot = combined_r_plot,
+       width = 15, height = 20, dpi = 300, bg = "white")
+
+```
+
+Including bw \> 1.5
+
+```{r}
+common_SIDs <- network_plots %>%
+  distinct(SID, .keep_all = TRUE) %>%
+  pull(SID)
+
+# Function to extract and average R²s over 5 sets
+# average_r2 <- function(pred_list) {
+#   r2s <- map(pred_list$tverrors, ~ .x$R2)
+#   mean_r2s <- reduce(r2s, `+`) / length(r2s)
+#   return(r2s)
+# }
+average_r2 <- function(pred_list) {
+  pred_list$errors$R2
+}
+
+
+# Apply to tv_lagged
+tv_lagged <- tvn_tvvar_pred %>%
+  filter(SID %in% common_SIDs) %>%
+  arrange(SID) %>%
+  mutate(tv_lagged = map(pred, average_r2)) %>%
+  select(SID, tv_lagged)
+
+# Apply to tv_contemp
+tv_contemp <- tvn_contemp_pred %>%
+  filter(SID %in% common_SIDs) %>%
+  arrange(SID) %>%
+  mutate(tv_contemp = map(pred, average_r2)) %>%
+  select(SID, tv_contemp)
+```
+
+Combine R squareds across four models into one df
+
+```{r}
+# R²s from stationary model
+stationary_lagged <- stationary_models %>%
+  mutate(
+    stationary_lagged = map(lag_models, ~ .x[["predictions"]][["errors"]][["R2"]])
+  ) %>%
+  select(SID, stationary_lagged)
+
+stationary_contemp <- stationary_models %>%
+  mutate(
+    stationary_contemp = map(con_models, ~ .x$predictions$errors$R2)
+  ) %>%
+  select(SID, stationary_contemp)
+
+comparison_tibble <- tv_lagged %>%
+  left_join(tv_contemp, by = "SID") %>%
+  left_join(stationary_lagged, by = "SID") %>%
+  left_join(stationary_contemp, by = "SID")
+```
+
+```{r}
+compare_r2s <- function(SID, tv_lagged, tv_contemp, stationary_lagged, stationary_contemp) {
+  lagged_diff <- tv_lagged - stationary_lagged
+  contemp_diff <- tv_contemp - stationary_contemp
+  
+  tibble(
+    SID = SID,
+    lagged_diff = lagged_diff,
+    contemp_diff = contemp_diff
+  )
+}
+
+r_comp_results <- future_pmap_dfr(
+  comparison_tibble,
+  compare_r2s
+) %>%
+  mutate(Variable = rep(c("Sociability", "EnergyLevel", "Assertive",
+                      "Trust", "Respect", "Compassion",
+                      "Productivity", "Responsibility", "Organization", 
+                      "Depression", "Anxiety", "EmotionalVol",    
+                      "IntCuriosity", "AesthSense", "CrtvImagination"), nrow(comparison_tibble))
+         ) %>%
+  select(SID, Variable, contains("diff"))
+
+table(r_comp_results$contemp_diff > 0)
+table(r_comp_results$lagged_diff > 0)
+
+```
+
+```{r}
+r_comp_results <- r_comp_results %>%
+  rename(Contemporaneous = contemp_diff,
+         Lagged = lagged_diff) 
+
+df_long <- r_comp_results %>%
+  select(SID, Variable, Contemporaneous, Lagged) %>%
+  pivot_longer(cols = c(Contemporaneous, Lagged), names_to = "Comparison", values_to = "R2_Diff") 
+
+# Remove R2_Diff values with frequency < 1
+df_long <- df_long %>%
+  group_by(R2_Diff) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+# Define the  variable order
+var_order <- c("Sociability", "EnergyLevel", "Assertive", "Trust", "Respect",
+               "Compassion", "Productivity", "Responsibility", "Organization",
+               "Depression", "Anxiety", "EmotionalVol", "IntCuriosity",
+               "AesthSense", "CrtvImagination")
+
+# Make sure Variable is a factor with the desired order
+df_long$Variable <- factor(df_long$Variable, levels = var_order)
+
+# Compute the global min and max for centering zero
+global_min <- min((df_long$R2_Diff), na.rm = TRUE)/2
+global_max <- max(df_long$R2_Diff, na.rm = TRUE)  # Largest max
+
+# Define colors
+ito_colors <- ggpubfigs::friendly_pal("ito_seven")
+
+
+# Plot
+density_plot <- ggplot(df_long, aes(x = R2_Diff, fill = Comparison)) +
+  geom_density(alpha = 0.5, adjust = 0.5) +
+
+  # Median vertical lines, colored by Comparison
+  geom_vline(
+    data = summary_medians,
+    aes(xintercept = median, color = Comparison),
+    linetype = "dashed",
+    linewidth = 1,
+    show.legend = FALSE
+  ) +
+
+  facet_wrap(~ Variable, ncol = 3, nrow = 5, scales = "fixed") +
+
+  # Use same colors for fill and line
+  scale_fill_manual(name = "", values = c(Contemporaneous = ito_colors[1],
+                                          Lagged = ito_colors[2])) +
+  scale_color_manual(name = NULL, values = c(Contemporaneous = ito_colors[1],
+                                             Lagged = ito_colors[2])) +
+
+  coord_cartesian(xlim = c(global_min, global_max)) +
+  theme_minimal() +
+  labs(title = "Density Distributions of R-Squared Differences Across Facets Including Stationary",
+       x = "R-Squared Difference",
+       y = "Density") +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = .5, face = "bold", size = 20),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    strip.text = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 16)
+  )
+
+density_plot
+
+ggsave("Manuscript Tables and Figures/RSquared_Density_Plots_With_Stationary.pdf", plot = density_plot, width = 15, height = 10, dpi = 300, bg = "white")
+```

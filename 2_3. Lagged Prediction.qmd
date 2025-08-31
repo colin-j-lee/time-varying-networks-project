@@ -1,0 +1,62 @@
+---
+title: "2_3. TVVAR Prediction"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, include = FALSE}
+library(mgm)
+library(plyr)
+library(psych)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/tvn_tvvar.RData", wd)) #tvn models
+
+```
+
+I tried mapping, but got this error: no applicable method for 'predict' applied to an object of class "c('mgm', 'tvmvar')"
+
+have to for loop cause map doesnt work with predict fnc for some reason
+
+```{r, predict function}
+# for loop kms
+fuckyou <- list()
+
+for(i in 1:nrow(tvn_tvvar)){
+  fuckyou[[i]] <- (predict(object = tvn_tvvar$tvvar[[i]],
+                                  data = tvn_tvvar$data[[i]] %>%
+                                    select(Sociability:CrtvImagination), 
+                                  errorCon = c("R2", "RMSE"),
+                                  tvMethod = "weighted", 
+                                  beepvar = tvn_tvvar$data[[i]]$beepno,
+                                  dayvar = tvn_tvvar$data[[i]]$dayno
+                                  )
+                          )
+  print(i)
+}
+
+tvn_tvvar_pred <- tvn_tvvar %>% mutate(pred = fuckyou)
+save(tvn_tvvar_pred, file="Data/tvn_tvvar_pred.RData")
+
+#check to see if any didnt pred
+# Add a column that checks for NULL R² in each row
+tvn_tvvar_pred <- tvn_tvvar_pred %>%
+  mutate(
+    r2_is_null = map_lgl(pred, ~ is.null(.x[["errors"]][["R2"]]))
+  )
+
+tvn_tvvar_pred %>%
+  filter(r2_is_null)
+#apparently not
+
+```

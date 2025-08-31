@@ -1,0 +1,182 @@
+---
+title: "7_2. TV MGM Vis Exemplars"
+format: html
+editor: visual
+---
+
+```{r, load packages and wd, warning = FALSE, message = FALSE, echo = FALSE}
+library(qgraph)
+library(mgm)
+library(RColorBrewer)
+library(scales)
+library(psych)
+library(furrr)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+Load Data
+
+```{r}
+load(sprintf("%s/Data/pp_data_mgm.RData", wd)) 
+
+```
+
+One exemplar
+
+```{r, eval=FALSE}
+p17054 <- pp_data_mgm %>% filter(SID == 17054)
+save(p17054, file = "Data/p17054.RData")
+```
+
+Choose participants
+
+```{r}
+y <- c(25637,
+       44612,
+       92518, 
+       59942)
+x <- pp_data_mgm %>% filter(SID %in% y) %>% select(SID, bandwidth, obs)
+exemplars <- pp_data_mgm %>%
+  select(SID, bandwidth, obs) %>%
+  arrange(desc(obs)) %>%
+  filter(bandwidth < 1.5) %>%
+  head(n=30) 
+
+
+pp_exemplars <- pp_data_mgm %>%
+  filter(SID %in% exemplars$SID)
+rm(pp_data_mgm)
+
+
+#p14657 <- pp_exemplars %>% filter(SID == 14657)
+#save(p14657, file = "Data/p14657.RData")
+
+
+```
+
+Preprocessing
+
+Compute mean model over time for layout
+
+```{r}
+# ----- Preprocessing  ------
+# Compute mean model over time to create decent layout
+mean_wadj <- list()
+for(i in 1:nrow(pp_exemplars)){
+  mean_wadj[[i]] <- apply(pp_exemplars[[5]][[i]][["pairwise"]][["wadj"]], 1:2, mean)
+}
+
+#negative signs are stored separately so apply them to the relevant parameter estimates
+par_ests <- list()
+for(i in 1:nrow(pp_exemplars)){
+  par_ests[[i]] <- (pp_exemplars[[5]][[i]][["pairwise"]][["wadj"]])
+  }
+
+ind_negative <- list()
+for(i in 1:nrow(pp_exemplars)){
+  ind_negative[[i]] <- which(pp_exemplars[[5]][[i]][["pairwise"]][["signs"]] == -1, arr.ind = T)
+  }
+
+for(i in 1:nrow(pp_exemplars)){
+  par_ests[[i]][ind_negative[[i]]] <- par_ests[[i]][ind_negative[[i]]]*-1
+}
+
+parm_sds <- list()
+for(i in 1:nrow(pp_exemplars)){
+  parm_sds[[i]] <- apply(par_ests[[i]], 1:2, sd)
+}
+max(parm_sds[[1]])
+```
+
+# ----- Plotting ------
+
+```{r}
+
+# Get layout of mean graph
+Q_shit <- list()
+for(i in 1:length(mean_wadj)){
+  Q_shit[[i]] <- qgraph(t(mean_wadj[[i]]), layout="spring", DoNotPlot=T, repulsion=.6)
+}
+
+# Plot graph at selected fixed time points
+tpSelect <- 1:10
+
+#group by trait
+traitgroups <- list("Extraversion" = c(1:3), #columns in df
+                    "Agreeableness" = c(4:6),
+                    "Conscientiousness" = c(7:9),
+                    "Neuroticism" = c(10:12),
+                    "Openness" = c(13:15)
+                    )
+
+#default plotting settings
+theme_set(theme_bw(base_size = 14, base_family="Times") )
+theme_update(legend.position="bottom", 
+             panel.spacing=grid::unit(0,"lines"),
+             strip.background=element_rect(color="black",fill="white"),
+             panel.grid=element_blank())
+```
+
+```{r}
+# contemp_net_plots <- list()
+tvn_plot_fnc <- function(tpSelect, par_ests, Q_shit, traitgroups, tvmgm, bandwidth, preds, data, SID){
+  for(tp in tpSelect){
+      qgraph(par_ests[[i]][, , tp], #parameter estimates to graph
+             layout = Q_shit[[i]]$layout, #using mean; "spring" has overlapping nodes
+             groups = traitgroups, #group traits by color
+             palette = 'colorblind',
+             width = 15 * 1.4, # width of figure
+             height = 16, # height of figure,
+             border.width = 0.5,
+             label.cex = 0.7, # scalar on label size
+             label.color = 'black', # string on label colors
+             label.prop = 0.9, 
+             negDashed = T, #this aint workin
+             loop = 0.7,
+             edge.color = t(pp_exemplars$tvmgm[[1]][["pairwise"]][["edgecolor"]][, 1, tp]), 
+             labels = c("Sociability", "Energy Level", colnames(data[[i]][,5:13]), "Emo Volatility", "Int Curiosity", "Aesth Sense", "Crtv Imagination"), #variable names
+             minimum = 0, #min value for edge to be shown
+             maximum = .5, #max to scale edge weights
+             threshold = 0.1,
+             title.cex=1, #title size
+             border.color = "grey60", edge.color = "grey60", 
+             trans=1,fade=F,
+             vTrans = 190, # transparency of the nodes to better determine edges crossing node areas
+             details = F, shape = "ellipse", node.width=1, node.height=.6, # node appearance
+             vsize = 13, #node size 
+             asize = 4, #arrow head size
+             edge.width=.6,
+             label.font=15, 
+             label.scale=F,
+             #pie = preds[[i]]$tverrors[[tp]][, 3], #hold off for conference talk
+             title=paste(paste0("Participant ", 
+                                unique(as.character(SID[[i]])), 
+                                " Time-Varying Contemporaneous Network",
+                                " Estimation Point ", as.character(tp), 
+                                "\nBandwidth = ",round(bandwidth[i],3))),
+             layoutOffset=c(0,0), 
+             GLratio=3.5, 
+             layoutScale=c(.8, .8))
+      }
+}
+```
+
+```{r, echo = FALSE}
+pdf("PP MGM Exemplar Networks.pdf")
+tvn <- list()
+for(i in 1:nrow(pp_exemplars)){
+  tvn_plot_fnc(tpSelect, par_ests, 
+               Q_shit, traitgroups, 
+               tvmgm = pp_exemplars$tvmgm, 
+               bandwidth = pp_exemplars$bandwidth, 
+               preds = pp_exemplars$preds, 
+               data = pp_exemplars$data, 
+               SID = pp_exemplars$SID)
+}
+dev.off()
+```

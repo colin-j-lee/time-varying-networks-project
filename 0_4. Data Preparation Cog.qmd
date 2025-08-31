@@ -1,0 +1,214 @@
+---
+title: "0_4. Data Preparation Cog"
+author: "Colin J Lee"
+format: 
+  html:
+    code-tools: true
+    code-copy: true
+    code-line-numbers: true
+    code-link: true
+    theme: united
+    highlight-style: tango
+    df-print: paged
+    code-fold: show
+    toc: true
+    toc-float: true
+    self-contained: true
+---
+
+```{r, include = FALSE}
+library(lubridate)
+library(janitor)
+library(Amelia)
+library(plyr)
+library(psych)
+library(lavaan)
+library(tidyverse)
+
+set.seed(420)
+
+wd <- getwd()
+setwd(wd)
+```
+
+```{r, codebook and data, include = FALSE}
+load("Raw Data/cog_raw.RData")
+
+cog_states <- cog_raw
+#initial ids for demographics
+cog_ids_pre <- unique(cog_states$SID)
+
+save(cog_ids_pre, file = "Data/cog_ids_pre.RData")
+```
+
+```{r, clean and min assessments}
+### how many participants initially in dataset?
+cog_states %>%
+  group_by(SID) %>%
+  distinct(SID) %>%
+  nrow() #190
+
+# Min 50
+cog_states <- cog_states %>%
+  group_by(SID) %>%
+  filter(n() >= 50) %>% #199 participants to 70
+  arrange(SID, Date) %>%
+  mutate(all_beeps = seq(1, n(), 1)) %>%
+  ungroup() %>%
+  select(SID, Date, Hour, HourBlock1, everything(),
+         -StartDate)
+
+length(unique(cog_states$SID)) #116
+
+
+```
+
+```{r, multiple imputation}
+cog_states_mi <- data.frame(unclass(cog_states %>% 
+                                       select(-Date, -Hour, -HourBlock1)))
+
+cog_states_mi <- amelia(cog_states_mi, m = 1, ts = "all_beeps", cs = "SID")$imputations[[1]] %>%
+  as_tibble() %>%
+  full_join(cog_states%>% select(SID, Date, Hour, HourBlock1, all_beeps)) %>%
+  select(-all_beeps); cog_states_mi
+
+# check ranges after imputation
+cog_states_range <- data.frame(sapply(cog_states_mi, function(x) range(x, na.rm = TRUE)))
+cog_states_range <- data.frame(t(cog_states_range)) #outside 1 and 5
+cog_states_range
+
+# look at state values post MI
+cog_pers <- cog_states_mi %>%
+  select(A_cmpn:N_emoVol)
+describe(cog_pers) # min and max values outside of 1-5 range
+
+# restrict range of state values after MI
+cog_pers[ cog_pers > 5 ] <- 5
+cog_pers[ cog_pers < 1] <- 1
+
+#recombine
+cog_states_mi <- cbind(cog_states_mi$SID, cog_states_mi$Date, cog_states_mi$Hour, cog_states_mi$HourBlock1, cog_pers)
+colnames(cog_states_mi)[1] <- "SID"
+colnames(cog_states_mi)[2] <- "Date"
+colnames(cog_states_mi)[3] <- "Hour"
+colnames(cog_states_mi)[4] <- "HourBlock1"
+
+
+describe(cog_states_mi)
+
+cog_wide <- cog_states_mi
+```
+
+```{r}
+# order personality variables EACNO
+cog_wide_order <- cog_wide %>%
+  select("E_scblty", "E_enerLev", "E_assert", "A_trust", "A_rspct", "A_cmpn", "C_prdctv", "C_rspnsbl", "C_org", "N_dep", "N_anx", "N_emoVol", "O_intCur", "O_aesSens", "O_crtvImag")
+
+cog_wide <- cbind(cog_wide$SID, cog_wide$Date, cog_wide$Hour, cog_wide$HourBlock1, 
+                   cog_wide_order)
+sum(is.na(cog_wide)) #68; 
+#so one participant doesnt have HourBlock1. manually inputting 8 for participant 80552
+cog_wide[is.na(cog_wide)] <- 8
+
+#create DIAMOnds ; for cog its just gonna be NAs
+cog_wide <- cog_wide %>%
+  mutate(Duty = NA,
+         Intellect = NA,
+         Adversity = NA,
+         Mating = NA,
+         pOsitivity = NA,
+         Negativity = NA,
+         Deception = NA,
+         Sociality = NA)
+
+colnames(cog_wide) <- c("SID", "Date", "Hour", "HourBlock1", "Sociability", "EnergyLevel", "Assertive", "Trust", "Respect", "Compassion", "Productivity", "Responsibility", "Organization", "Depression", "Anxiety", "EmotionalVol", "IntCuriosity", "AesthSense", "CrtvImagination", "Duty", "Intellect","Adversity", "Mating", "pOsitivity", "Negativity", "Deception", "Sociality")
+```
+
+```{r, POMP}
+pomp <- function(x, na) (x - min(x, na.rm = na))/(max(x, na.rm = na) - min(x, na.rm = na))*100
+
+cog_wide <- cog_wide %>%
+  mutate(
+    Sociability = pomp(Sociability, TRUE)
+    , EnergyLevel =  pomp(EnergyLevel, TRUE)
+    , Assertive =  pomp(Assertive, TRUE)
+    , Trust =  pomp(Trust, TRUE)
+    , Respect =  pomp(Respect, TRUE)
+    , Compassion =  pomp(Compassion, TRUE)
+    , Productivity =  pomp(Productivity, TRUE)
+    , Responsibility =  pomp(Responsibility, TRUE)
+    , Organization =  pomp(Organization, TRUE)
+    , Depression =  pomp(Depression, TRUE)
+    , Anxiety =  pomp(Anxiety, TRUE)
+    , EmotionalVol =  pomp(EmotionalVol, TRUE)
+    , IntCuriosity =  pomp(IntCuriosity, TRUE)
+    , AesthSense =  pomp(AesthSense, TRUE)
+    , CrtvImagination =  pomp(CrtvImagination, TRUE)
+  )
+
+#describe(cog_wide) #cool
+```
+
+LOOK AT VARIABLE VARIANCES
+
+Descriptives
+
+```{r}
+#make it long
+cog_long <- cog_wide %>%
+  select(SID, Sociability:CrtvImagination) %>%
+  pivot_longer(
+    cols = Sociability:CrtvImagination
+    , names_to = c("trait")
+    , values_to = "value"
+  ) 
+
+# function for mean, sd, median, min, max, n, n missing
+descriptive_fun <- function(df, var) {
+  df %>%
+  summarize(
+      mean = mean({{ var }},   na.rm = TRUE),
+      sd     = sd({{ var }},     na.rm = TRUE),
+      median = median({{ var }}, na.rm = TRUE),
+      min    = min({{ var }},    na.rm = TRUE),
+      max    = max({{ var }},    na.rm = TRUE),
+      # omega  = omega({{var}}),
+      # alpha  = alpha({{var}}),
+      n      = n(),
+      .groups = "drop"
+      )
+}
+
+cog_descriptives <- cog_long %>%
+  group_by(SID, trait) %>% # we want descriptive for each trait for each participant
+  descriptive_fun(var = value) %>% 
+  ungroup()
+
+```
+
+Look at low variance participant-variables
+
+```{r}
+cog_descriptives %>%
+  filter(sd == 0 ) 
+#LETS FUCKING GO
+```
+
+Add study variable
+```{r}
+cog_wide <- cog_wide %>%
+  mutate(study = "Soc-Cog")
+
+table(is.na(cog_wide))
+
+
+
+#post ids for demographics
+cog_ids_post <- unique(cog_wide$SID)
+
+save(cog_ids_post, file = "Data/cog_ids_post.RData")
+```
+
+```{r, save}
+save(cog_wide, file = "Data/cog_wide.RData")
+```
